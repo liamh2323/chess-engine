@@ -93,7 +93,7 @@ impl Game {
                 Square::Occupied(idx) => temp.push_str(&self.pieces[*idx].to_string()),
             }
 
-            if (i +1) % 8 {
+            if ((i +1) % 8 )=={
                 temp.push_str("\n");
                 board.insert_str(0, &temp);
                 temp.clear();
