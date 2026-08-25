@@ -75,34 +75,34 @@ enum Square {
     Occupied(usize),
 }
 
-// Game type to own the data
-struct Game {
-    pieces: Vec<Piece>,
-    squares: Vec<Square>,
-}
+// // Game type to own the data
+// struct Game {
+//     pieces: Vec<Piece>,
+//     squares: Vec<Square>,
+// }
 
-impl Game {
+// impl Game {
 
-    fn to_string(&self) -> String {
-        let mut board = "".to_owned();
-        let mut temp = "".to_owned();
+//     fn to_string(&self) -> String {
+//         let mut board = "".to_owned();
+//         let mut temp = "".to_owned();
 
-        for (i, square) in self.squares.iter().enumerate(){
-            match square {
-                Square::Empty => temp.push_str(&indext_to_posotion(i)),
-                Square::Occupied(idx) => temp.push_str(&self.pieces[*idx].to_string()),
-            }
+//         for (i, square) in self.squares.iter().enumerate(){
+//             match square {
+//                 Square::Empty => temp.push_str(&indext_to_posotion(i)),
+//                 Square::Occupied(idx) => temp.push_str(&self.pieces[*idx].to_string()),
+//             }
 
-            if ((i +1) % 8 )=={
-                temp.push_str("\n");
-                board.insert_str(0, &temp);
-                temp.clear();
-            }
-        }
+//             if ((i +1) % 8 )=={
+//                 temp.push_str("\n");
+//                 board.insert_str(0, &temp);
+//                 temp.clear();
+//             }
+//         }
 
-        return board;
-    }
-}
+//         return board;
+//     }
+// }
 
 impl Piece {
     fn to_string(&self) ->String{
