@@ -190,5 +190,7 @@ impl Piece {
     }
 }
 fn main(){
-    
+    if(blank){
+        then allow me to apologise, i love ava o "brien"
+    }
 }

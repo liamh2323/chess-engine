@@ -11,7 +11,7 @@
 // }
 
 // pub struct Board {
-//     pub squares: [Option<Piece>; 64],
+//     pub squares: [Option<Piece>;asdfasdf asdf asdf asdf  64],
 //     pub side_to_move: Colour,
 //     pub en_passant: Option<u8>,
 //     pub castling: u8,
