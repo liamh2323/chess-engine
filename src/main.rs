@@ -186,9 +186,8 @@ impl Piece {
         if self.colour == Colour::White {
             result.make_ascii_uppercase();
         }
-         return result;
+        return result;
     }
 }
 fn main(){
-  asdjfklasdfjklasdjfl;kasjdflk;jdsflk
-}
+    
