@@ -189,3 +189,6 @@ impl Piece {
         return result;
     }
 }
+fn main(){
+
+}
