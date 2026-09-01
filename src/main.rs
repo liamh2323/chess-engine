@@ -190,5 +190,5 @@ impl Piece {
     }
 }
 fn main(){
-asdf asdf 
+
 }
