@@ -1,6 +1,9 @@
 use std::{fmt::format, vec};
 use bitflags::bitflags;
+use std::collections::VecDeque;
+
 type PiecePosition = u64;
+
 
 fn bit_to_position(bit: PiecePosition) -> Result<String, String> {
     if bit == 0 {
@@ -212,13 +215,75 @@ fn read_FEN(fen: &str) -> Game {
                                 };
     let (position,rest) = split_on(fen, ' ');
 
+    let mut deque_squares = VecDeque::new();
+
+
+
     for row in position.splitn(8, |ch| ch == '/'){
+        piece_position -= 8;
+        let (pieces, squares) = parse_row(&row, piece_index, piece_position);
+
+        for p in pieces {
+            game.pieces.push(p);
+        }
+        for s in squares {
+            deque_squares.push_front(s);
+        }
         print!("row: '{}'", row);
     }
 
-
+    game.squares = Vec::from(deque_squares);
     game                                              
-}               
+}
+
+fn parse_row(row: &str, mut piece_index: usize, mut piece_position: usize) -> (Vec<Piece>, VecDeque<Square>) {
+    let mut pieces = Vec::new();
+    let mut squares = VecDeque::new();
+
+    let mut colour;
+
+
+    macro_rules! add_piece {
+        ($piece_type:ident) => {
+            {
+                let piece = Piece {colour: colour,
+                               position: (1 as u64) << piece_position,
+                               piece_type: PieceType::$piece_type};
+                let square = Square::Occupied(piece_index);
+                pieces.push(piece);
+                squares.push_front(square);
+                piece_position += 1;
+                piece_index += 1;
+            }
+        };
+    }
+
+
+    for ch in row.chars() {
+        let is_upper = ch.is_ascii_uppercase();
+        colour = if is_upper {Colour::White} else {Colour::Black};
+        match ch.to_ascii_lowercase() {
+            'r' => add_piece!(Rook),
+            'n' => add_piece!(Knight),
+            'b' => add_piece!(Bishop),
+            'q' => add_piece!(Queen),
+            'k' => add_piece!(King),
+            'p' => add_piece!(Pawn),
+            num => {
+                match num.to_digit(10) {
+                    None => panic!("Invalid input: {}", num),
+                    Some(number) => for i in 0..number {
+                        squares.push_front(Square::Empty);
+                        piece_position += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    (pieces, squares)
+}
+
 
 fn split_on(s: &str, sep: char) -> (&str, &str){
     for (i, item) in s.chars().enumerate() {
