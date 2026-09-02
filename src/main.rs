@@ -1,5 +1,5 @@
 use std::{fmt::format, vec};
-
+use bitflags::bitflags;
 type PiecePosition = u64;
 
 fn bit_to_position(bit: PiecePosition) -> Result<String, String> {
@@ -75,11 +75,37 @@ enum Square {
     Occupied(usize),
 }
 
+bitflags! {
+    struct CastlingRights : u8 {
+        const NONE = 0;
+        const WHITEKINGSIDE = 1 <<0;
+        const WHITEQUEENSIDE = 1 << 1;
+        const BLACKKINGSIDE = 1 << 2;
+        const BLACKQUEENSIDE = 1 << 3;
+        const ALL =
+            Self::WHITEKINGSIDE.bits 
+            | Self::WHITEQUEENSIDE.bits
+            | Self::BLACKKINGSIDE.bits
+            | Self::BLACKQUEENSIDE.bits;
+    }   
+}
+
+
 // Game type to own the data
 struct Game {
     pieces: Vec<Piece>,
     squares: Vec<Square>,
+    active_colour: Colour,
+    castling_rights : CastlingRights,
+    en_passant: Option<PiecePosition>,
+    halfmove_clock: usize,
+    fullmove_clock: usize,
 }
+
+// WhiteKingSide = 1 << 0 #0001 / 0100
+// WhiteQueenSide = 1 << 1 # 0010/ 1000
+
+
 
 impl Game {
     fn push_piece_and_square(&mut self, position: usize, colour: Colour, piece_type: PieceType, index: &mut usize){
@@ -95,7 +121,9 @@ impl Game {
     }
 
     fn initialise() -> Game {
-        let mut game = Game {pieces: vec![], squares: vec![]};
+        let mut game = Game {pieces: vec![], squares: vec![],
+                                    active_colour: Colour::White, castling_rights: CastlingRights:ALL,
+                                    en_passant : None, halfmove_clock : 0, fullmove_clock :1 };
         let mut piece_index = 0;
         let colour = Colour::White;
 
@@ -146,10 +174,8 @@ impl Game {
         game.push_piece_and_square(6+ offset, colour, 
                                     PieceType::Knight, &mut piece_index);
         game.push_piece_and_square(7+ offset, colour, 
-                                    PieceType::Rook, &mut piece_index);  
-
-            
-     }  
+                                    PieceType::Rook, &mut piece_index);   
+        }  
 
     fn to_string(&self) -> String {
         let mut board = "".to_owned();
@@ -173,6 +199,39 @@ impl Game {
     }
 }
 
+#[allow(non_snake_case)]
+fn read_FEN(fen: &str) -> Game {
+    let game = Game {
+                                pieces: vec![], 
+                                squares: vec![],
+                                active_colour: Colour::White,
+                                castling_rights: CastlingRights::ALL,
+                                en_passant : None, 
+                                halfmove_clock : 0, 
+                                fullmove_clock : 0
+                                };
+    let (position,rest) = split_on(fen, ' ');
+
+    for row in position.splitn(8, |ch| ch == '/'){
+        print!("row: '{}'", row);
+    }
+
+
+    game                                              
+}               
+
+fn split_on(s: &str, sep: char) -> (&str, &str){
+    for (i, item) in s.chars().enumerate() {
+        if item == sep {
+            return (&s[0..1], &s[i +1..]);
+        }
+    }
+    (&s[..], "")
+}
+
+
+
+
 impl Piece {
     fn to_string(&self) ->String{
         let mut result= match self.piece_type {
@@ -190,5 +249,6 @@ impl Piece {
     }
 }
 fn main(){
+    let fen_str = "";
 
 }
