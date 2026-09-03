@@ -313,7 +313,4 @@ impl Piece {
         return result;
     }
 }
-fn main(){
-    let fen_str = "";
-
-}
+fn main(){}
