@@ -316,4 +316,4 @@ impl Piece {
 fn main(){
     let fen_str = "";
 
-}
+}a
