@@ -314,6 +314,5 @@ impl Piece {
     }
 }
 fn main(){
-    //chess chess chess
 }
 
