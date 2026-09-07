@@ -313,5 +313,7 @@ impl Piece {
         return result;
     }
 }
-fn main(){}
+fn main(){
+    //chess chess chess
+}
 
