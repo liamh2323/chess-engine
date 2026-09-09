@@ -14,9 +14,38 @@ fn bit_to_position(bit: PiecePosition) -> Result<String, String> {
     }
 }
 
+fn position_to_bit(position : &str) -> Result<PiecePosition, String> {
+    if position.len() != 2 {
+        return Err(format!("Invalid length"));
+    }
+    let bytes = position.as_bytes();
+    let byte0 = bytes[0];
+    if byte0 < 97 || byte0 >= 97 + 8 {
+        return Err(format!("Invalid Column Char"));
+    }
+    let column = (byte0 - 97) as u32;
+    
+    let byte1 = bytes[1];
+    let row;
+
+    match (byte1 as char).to_digit(10) {
+        Some(number) => if number < 1 || number >8 {
+            return Err (format!("invalid row"));
+        } else {
+        row = number -1;
+        },
+    None => return Err(format!("Invalid row")),
+    }
+
+    let square_number = row * 8 + column;
+    let bit = (1 as u64) << square_number;
+
+    Ok(bit)
+}
+
 static COL_MAP:  [char;8] = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
 
-fn indext_to_posotion(index: usize) -> String {
+fn index_to_posotion(index: usize) -> String {
    let column = index % 8;
    let row = index / 8 + 1;
 
@@ -204,7 +233,7 @@ impl Game {
 
 #[allow(non_snake_case)]
 fn read_FEN(fen: &str) -> Game {
-    let game = Game {
+    let mut game = Game {
                                 pieces: vec![], 
                                 squares: vec![],
                                 active_colour: Colour::White,
@@ -233,6 +262,36 @@ fn read_FEN(fen: &str) -> Game {
     }
 
     game.squares = Vec::from(deque_squares);
+
+    let (colour_to_move, rest) = split_on(rest, ' ');
+    game.active_colour = match colour_to_move {
+        "w" => Colour::White,
+        "b" => Colour::Black,
+        _ => panic!("Unknown colour designator : '{}'", colour_to_move)
+    };
+
+    let(castling_rights, rest) = split_on(rest, ' ');
+    let mut castling = CastlingRights::NONE;
+    for ch in castling_rights.chars(){
+        match ch {
+            'K' => castling |= CastlingRights::WHITEKINGSIDE,
+            'Q' => castling |= CastlingRights::WHITEQUEENSIDE,
+            'k' => castling |= CastlingRights::BLACKKINGSIDE,
+            'q' => castling |= CastlingRights::BLACKQUEENSIDE,
+            '-' => (),
+            other => panic!("Invalid char in castling rights"),
+        }
+    } 
+
+    let (en_passant, rest) = split_on(rest, ' ');
+    match en_passant {
+        "-" => game.en_passant = None,
+        s => match position_to_bit(s){
+            Err(msg) => panic!("{}", msg),
+            Ok(bit) => game.en_passant = Some(bit),
+        }
+    };
+
     game                                              
 }
 
@@ -315,6 +374,6 @@ impl Piece {
 }
 fn main(){
 
-    asdfsadfasdfasdfwef
+    
 }
 
