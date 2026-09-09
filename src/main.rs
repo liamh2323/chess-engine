@@ -73,10 +73,10 @@ static MOD67TABLE: [usize; 67] = [
     6, 34, 33
 ];
 
-// fn bit_scan(bit: u64) -> usize{
-//     let remainder = bit % 67;
-//     return MOD67TABLE[remainder];
-// }
+fn bit_scan(bit: u64) -> usize{
+    let remainder = bit % 67;
+    return MOD67TABLE[remainder];
+}
 #[derive(Debug, PartialEq,Clone, Copy)]
 enum Colour {
     White,
