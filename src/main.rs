@@ -383,9 +383,4 @@ impl Piece {
         return result;
     }
 }
-fn main(){
-
- aasdfasdfasdfasdfsewsdfjoiseoijoiwegjveojvgoewigjweoighweighewighweighweighighighwihhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh
- asdgfasdgh
- asdgohasdghsakdjg
- asdjghasjdhgkjsahdg}
+fn main(){}
