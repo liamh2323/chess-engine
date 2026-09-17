@@ -383,4 +383,4 @@ impl Piece {
         return result;
     }
 }
-fn main(){}asdfasdfaskdjfklasdjf;ljsadflkjsdl;fjsdklfjjslkdfjklsdjf;lksdj;f
+fn main(){}asdfasdfaskdjfklasdjf;ljsadflkjsdl;fjsdklf
