@@ -383,4 +383,6 @@ impl Piece {
         return result;
     }
 }
-fn main(){}
+fn main(){
+    
+}
