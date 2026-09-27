@@ -385,6 +385,5 @@ impl Piece {
 }
 fn main(){
 
- asdfasdfasdfasfasdfasdfasdfasdfasdgasdgasdgasdgs
-}
+ asdfa
 
