@@ -1,387 +1,149 @@
-use std::{fmt::format, vec};
-use bitflags::bitflags;
-use std::collections::VecDeque;
+pub mod board;
+pub mod eval;
+pub mod movegen;
+pub mod search;
+pub mod types;
+pub mod uci;
 
-type PiecePosition = u64;
+// Re-export all original types and functions so existing API remains intact
+pub use board::{Game, UndoInfo, read_FEN, split_on};
+pub use types::{
+    COL_MAP, CastlingRights, Colour, MOD67TABLE, Move, Piece, PiecePosition, PieceType, Square,
+    bit_scan, bit_to_position, index_to_position, index_to_posotion, position_to_bit,
+};
+pub use uci::UciHandler;
 
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let mut handler = UciHandler::new();
 
-fn bit_to_position(bit: PiecePosition) -> Result<String, String> {
-    if bit == 0 {
-        return Err("No Piece Present!".to_string()); 
-    }else {
-        let onebit_index = bit_scan(bit);
-        return Ok(index_to_position(onebit_index));
-    }
-}
-
-fn position_to_bit(position : &str) -> Result<PiecePosition, String> {
-    if position.len() != 2 {
-        return Err(format!("Invalid length"));
-    }
-    let bytes = position.as_bytes();
-    let byte0 = bytes[0];
-    if byte0 < 97 || byte0 >= 97 + 8 {
-        return Err(format!("Invalid Column Char"));
-    }
-    let column = (byte0 - 97) as u32;
-    
-    let byte1 = bytes[1];
-    let row;
-
-    match (byte1 as char).to_digit(10) {
-        Some(number) => if number < 1 || number >8 {
-            return Err (format!("invalid row"));
-        } else {
-        row = number -1;
-        },
-    None => return Err(format!("Invalid row")),
-    }
-
-    let square_number = row * 8 + column;
-    let bit = (1 as u64) << square_number;
-
-    Ok(bit)
-}
-
-static COL_MAP:  [char;8] = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h'];
-
-fn index_to_posotion(index: usize) -> String {
-   let column = index % 8;
-   let row = index / 8 + 1;
-
-    return format!("{}{}, COL_MAP[column], row)");
-}
-
-// fn bit_scan_simple(mut bit: u64) -> usize {
-//     let mut leading_zeros = 0;
-//     while bit & 1 ==0 {
-//         bit >>=1;
-//         leading_zeros +=1;
-//     }
-//     return leading_zeros;
-// }
-
-static MOD67TABLE: [usize; 67] = [
-    64, 0, 1, 39, 2, 15, 40, 23,
-    3, 12, 16, 59, 41, 19, 24, 54,
-    4, 63, 13, 10, 17, 62, 60, 28,
-    42, 30, 20, 51, 25, 44, 55, 47,
-    5, 32, 64, 38, 14, 22, 11, 58,
-    18, 53, 63, 9, 61, 27, 29, 50,
-    43, 46, 31, 37, 21, 57, 52, 8,
-    26, 49, 45, 36, 56, 7, 48, 35,
-    6, 34, 33
-];
-
-fn bit_scan(bit: u64) -> usize{
-    let remainder = bit % 67;
-    return MOD67TABLE[remainder];
-}
-#[derive(Debug, PartialEq,Clone, Copy)]
-enum Colour {
-    White,
-    Black
-}
-
-#[derive(Debug, PartialEq)]
-enum PieceType {
-    Pawn, 
-    Rook,
-    Knight,
-    Bishop,
-    Queen,
-    King
-}
-
-#[derive(Debug, PartialEq)]
-struct Piece {
-    position: PiecePosition,
-    colour: Colour,
-    piece_type: PieceType
-}
-
-// either empty or occupied
-#[derive(Debug, PartialEq)]
-enum Square {
-    Empty,
-    Occupied(usize),
-}
-
-bitflags! {
-    struct CastlingRights : u8 {
-        const NONE = 0;
-        const WHITEKINGSIDE = 1 <<0;
-        const WHITEQUEENSIDE = 1 << 1;
-        const BLACKKINGSIDE = 1 << 2;
-        const BLACKQUEENSIDE = 1 << 3;
-        const ALL =
-            Self::WHITEKINGSIDE.bits 
-            | Self::WHITEQUEENSIDE.bits
-            | Self::BLACKKINGSIDE.bits
-            | Self::BLACKQUEENSIDE.bits;
-    }   
-}
-
-
-// Game type to own the data
-struct Game {
-    pieces: Vec<Piece>,
-    squares: Vec<Square>,
-    active_colour: Colour,
-    castling_rights : CastlingRights,
-    en_passant: Option<PiecePosition>,
-    halfmove_clock: usize,
-    fullmove_clock: usize,
-}
-
-// WhiteKingSide = 1 << 0 #0001 / 0100
-// WhiteQueenSide = 1 << 1 # 0010/ 1000
-
-
-
-impl Game {
-    fn push_piece_and_square(&mut self, position: usize, colour: Colour, piece_type: PieceType, index: &mut usize){
-        self.pieces.push(Piece {position: (1 as u64) << position,
-                                colour: colour,
-                                piece_type: piece_type });
-        self.squares.push(Square::Occupied((*index)));
-        *index +=1;
-
-    }
-    fn push_empty_square(&mut self){
-        self.squares.push(Square::Empty);
-    }
-
-    fn initialise() -> Game {
-        let mut game = Game {pieces: vec![], squares: vec![],
-                                    active_colour: Colour::White, castling_rights: CastlingRights:ALL,
-                                    en_passant : None, halfmove_clock : 0, fullmove_clock :1 };
-        let mut piece_index = 0;
-        let colour = Colour::White;
-
-        game.push_piece_and_square(0, colour, 
-                                    PieceType::Rook, &mut piece_index);
-        game.push_piece_and_square(1, colour, 
-                                    PieceType::Knight, &mut piece_index);
-        game.push_piece_and_square(2, colour, 
-                                    PieceType::Bishop, &mut piece_index);
-        game.push_piece_and_square(3, colour, 
-                                    PieceType::Queen, &mut piece_index);
-        game.push_piece_and_square(4, colour, 
-                                    PieceType::King, &mut piece_index);
-        game.push_piece_and_square(5, colour, 
-                                    PieceType::Bishop, &mut piece_index);
-        game.push_piece_and_square(6, colour, 
-                                    PieceType::Knight, &mut piece_index);
-        game.push_piece_and_square(7, colour, 
-                                    PieceType::Rook, &mut piece_index);  
-
-        for i in 8..16 {
-            game.push_piece_and_square (i,colour, 
-                                        PieceType::Pawn, &mut piece_index);
-        }
-        for i in 16..48 {
-            game.push_empty_square();
-        }
-        let colour = Colour::Black;
-
-        for i in 48..56 {
-            game.push_piece_and_square (i, colour,
-                PieceType::Pawn, &mut piece_index);
+    if args.len() > 1 {
+        match args[1].as_str() {
+            "perft" => {
+                let depth = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(4);
+                println!("Running perft depth {}...", depth);
+                handler.run_perft(depth);
+                return;
             }
-        let offset = 56;
-
-        game.push_piece_and_square(0+ offset, colour, 
-                                    PieceType::Rook, &mut piece_index);
-        game.push_piece_and_square(1+ offset, colour, 
-                                    PieceType::Knight, &mut piece_index);
-        game.push_piece_and_square(2+ offset, colour, 
-                                    PieceType::Bishop, &mut piece_index);
-        game.push_piece_and_square(3+ offset, colour, 
-                                    PieceType::Queen, &mut piece_index);
-        game.push_piece_and_square(4+ offset, colour, 
-                                    PieceType::King, &mut piece_index);
-        game.push_piece_and_square(5+ offset, colour, 
-                                    PieceType::Bishop, &mut piece_index);
-        game.push_piece_and_square(6+ offset, colour, 
-                                    PieceType::Knight, &mut piece_index);
-        game.push_piece_and_square(7+ offset, colour, 
-                                    PieceType::Rook, &mut piece_index);   
-        }  
-
-    fn to_string(&self) -> String {
-        let mut board = "".to_owned();
-        let mut temp = "".to_owned();
-
-        for (i, square) in self.squares.iter().enumerate(){
-            match square {
-                Square::Empty => temp.push_str(&indext_to_posotion(i)),
-                Square::Occupied(idx) => temp.push_str(&self.pieces[*idx].to_string()),
+            "eval" => {
+                handler.handle_command("d");
+                handler.handle_command("eval");
+                return;
             }
-
-            if (i +1) % 8 == 0 {
-                temp.push_str("\n");
-                board.insert_str(0, &temp);
-                temp.clear();
+            "bench" => {
+                println!("Running engine benchmark...");
+                handler.handle_command("ucinewgame");
+                handler.handle_command("go depth 6");
+                return;
             }
+            _ => {}
         }
-        board.insert_str(0, &temp);
-
-        return board;
     }
+
+    // Default: run UCI / interactive interface
+    handler.run();
 }
 
-#[allow(non_snake_case)]
-fn read_FEN(fen: &str) -> Game {
-    let mut game = Game {
-                                pieces: vec![], 
-                                squares: vec![],
-                                active_colour: Colour::White,
-                                castling_rights: CastlingRights::ALL,
-                                en_passant : None, 
-                                halfmove_clock : 0, 
-                                fullmove_clock : 0
-                                };
-    let (position,rest) = split_on(fen, ' ');
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let mut deque_squares = VecDeque::new();
+    #[test]
+    fn test_position_conversion() {
+        assert_eq!(position_to_bit("a1").unwrap(), 1u64 << 0);
+        assert_eq!(position_to_bit("e4").unwrap(), 1u64 << 28);
+        assert_eq!(position_to_bit("h8").unwrap(), 1u64 << 63);
 
-
-
-    for row in position.splitn(8, |ch| ch == '/'){
-        piece_position -= 8;
-        let (pieces, squares) = parse_row(&row, piece_index, piece_position);
-
-        for p in pieces {
-            game.pieces.push(p);
-        }
-        for s in squares {
-            deque_squares.push_front(s);
-        }
-        print!("row: '{}'", row);
+        assert_eq!(bit_to_position(1u64 << 0).unwrap(), "a1");
+        assert_eq!(bit_to_position(1u64 << 28).unwrap(), "e4");
+        assert_eq!(bit_to_position(1u64 << 63).unwrap(), "h8");
     }
 
-    game.squares = Vec::from(deque_squares);
+    #[test]
+    fn test_initialise_matches_start_fen() {
+        let game_init = Game::initialise();
+        let game_fen = read_FEN("rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
 
-    let (colour_to_move, rest) = split_on(rest, ' ');
-    game.active_colour = match colour_to_move {
-        "w" => Colour::White,
-        "b" => Colour::Black,
-        _ => panic!("Unknown colour designator : '{}'", colour_to_move)
-    };
-
-    let(castling_rights, rest) = split_on(rest, ' ');
-    let mut castling = CastlingRights::NONE;
-    for ch in castling_rights.chars(){
-        match ch {
-            'K' => castling |= CastlingRights::WHITEKINGSIDE,
-            'Q' => castling |= CastlingRights::WHITEQUEENSIDE,
-            'k' => castling |= CastlingRights::BLACKKINGSIDE,
-            'q' => castling |= CastlingRights::BLACKQUEENSIDE,
-            '-' => (),
-            other => panic!("Invalid char in castling rights"),
-        }
-    } 
-
-    let (en_passant, rest) = split_on(rest, ' ');
-    match en_passant {
-        "-" => game.en_passant = None,
-        s => match position_to_bit(s){
-            Err(msg) => panic!("{}", msg),
-            Ok(bit) => game.en_passant = Some(bit),
-        }
-    };
-
-    let(halfmove_clock, rest) = split_on(rest, ' ');
-    match halfmove_clock.parse() {
-        Ok(number) => game.halfmove_clock = number;
-        Err(_) => panic!("invalid halfmove"),
-    }
-    let(fullmove_clock, rest) = split_on(rest, ' ');
-    match fullmove_clock.parse() {
-        Ok(number) => game.fullmove_clock = number;
-        Err(_) => panic!("invalid fullmove"),
+        assert_eq!(game_init.active_colour, game_fen.active_colour);
+        assert_eq!(game_init.castling_rights, game_fen.castling_rights);
+        assert_eq!(game_init.en_passant, game_fen.en_passant);
+        assert_eq!(game_init.halfmove_clock, game_fen.halfmove_clock);
+        assert_eq!(game_init.fullmove_clock, game_fen.fullmove_clock);
+        assert_eq!(game_init.to_fen(), game_fen.to_fen());
     }
 
-    game                                              
-}
+    #[test]
+    fn test_fen_roundtrip() {
+        let fens = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+            "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
+            "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8",
+        ];
 
-fn parse_row(row: &str, mut piece_index: usize, mut piece_position: usize) -> (Vec<Piece>, VecDeque<Square>) {
-    let mut pieces = Vec::new();
-    let mut squares = VecDeque::new();
+        for fen in fens {
+            let game = read_FEN(fen);
+            assert_eq!(game.to_fen(), fen);
+        }
+    }
 
-    let mut colour;
+    #[test]
+    fn test_perft_startpos() {
+        let mut game = Game::initialise();
+        assert_eq!(game.perft(1), 20);
+        assert_eq!(game.perft(2), 400);
+        assert_eq!(game.perft(3), 8902);
+        assert_eq!(game.perft(4), 197281);
+    }
 
+    #[test]
+    fn test_perft_kiwipete() {
+        let mut game =
+            read_FEN("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
+        assert_eq!(game.perft(1), 48);
+        assert_eq!(game.perft(2), 2039);
+        assert_eq!(game.perft(3), 97862);
+    }
 
-    macro_rules! add_piece {
-        ($piece_type:ident) => {
-            {
-                let piece = Piece {colour: colour,
-                               position: (1 as u64) << piece_position,
-                               piece_type: PieceType::$piece_type};
-                let square = Square::Occupied(piece_index);
-                pieces.push(piece);
-                squares.push_front(square);
-                piece_position += 1;
-                piece_index += 1;
-            }
+    #[test]
+    fn test_perft_pos3() {
+        let mut game = read_FEN("8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1");
+        assert_eq!(game.perft(1), 14);
+        assert_eq!(game.perft(2), 191);
+        assert_eq!(game.perft(3), 2812);
+        assert_eq!(game.perft(4), 43238);
+    }
+
+    #[test]
+    fn test_perft_pos4() {
+        let mut game = read_FEN("r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1");
+        assert_eq!(game.perft(1), 6);
+        assert_eq!(game.perft(2), 264);
+        assert_eq!(game.perft(3), 9467);
+    }
+
+    #[test]
+    fn test_perft_pos5() {
+        let mut game = read_FEN("rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8");
+        assert_eq!(game.perft(1), 44);
+        assert_eq!(game.perft(2), 1486);
+        assert_eq!(game.perft(3), 62379);
+    }
+
+    #[test]
+    fn test_search_finds_mate_in_one() {
+        // Scholar's mate delivery: Qxf7#
+        let mut game =
+            read_FEN("r1bqkb1r/pppp1ppp/2n5/4p3/2B1n3/5Q2/PPPP1PPP/RNB1K1NR w KQkq - 0 4");
+        let mut searcher = search::Searcher::new(&mut game);
+        let limits = search::SearchLimits {
+            max_depth: 3,
+            time_limit_ms: Some(1000),
         };
-    }
-
-
-    for ch in row.chars() {
-        let is_upper = ch.is_ascii_uppercase();
-        colour = if is_upper {Colour::White} else {Colour::Black};
-        match ch.to_ascii_lowercase() {
-            'r' => add_piece!(Rook),
-            'n' => add_piece!(Knight),
-            'b' => add_piece!(Bishop),
-            'q' => add_piece!(Queen),
-            'k' => add_piece!(King),
-            'p' => add_piece!(Pawn),
-            num => {
-                match num.to_digit(10) {
-                    None => panic!("Invalid input: {}", num),
-                    Some(number) => for i in 0..number {
-                        squares.push_front(Square::Empty);
-                        piece_position += 1;
-                    }
-                }
-            }
-        }
-    }
-
-    (pieces, squares)
-}
-
-
-fn split_on(s: &str, sep: char) -> (&str, &str){
-    for (i, item) in s.chars().enumerate() {
-        if item == sep {
-            return (&s[0..1], &s[i +1..]);
-        }
-    }
-    (&s[..], "")
-}
-
-
-
-
-impl Piece {
-    fn to_string(&self) ->String{
-        let mut result= match self.piece_type {
-            PieceType::Pawn => "p ",
-            PieceType::Rook => "r ",
-            PieceType::Knight => "n ",
-            PieceType::Bishop => "b ",
-            PieceType::Queen => "q ",
-            PieceType::King => "k ",
-        }.to_string();
-        if self.colour == Colour::White {
-            result.make_ascii_uppercase();
-        }
-        return result;
+        let (mv, score) = searcher.search(&limits);
+        assert!(mv.is_some());
+        assert_eq!(mv.unwrap().to_uci(), "f3f7");
+        assert!(score > search::MATE_SCORE - 10);
     }
 }
-fn main(){
-asdfasdfsafasdjfkalsjvosibvoibnr
