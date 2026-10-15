@@ -147,5 +147,5 @@ mod tests {
         assert!(score > search::MATE_SCORE - 10);
     }
 
-    asdfasdfasdfasdfasdfsadfs
+    asdfasdfasdfasdfasddfs
 }
