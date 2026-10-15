@@ -146,4 +146,6 @@ mod tests {
         assert_eq!(mv.unwrap().to_uci(), "f3f7");
         assert!(score > search::MATE_SCORE - 10);
     }
+
+    asdfasdfasdfasdfasdfsadfs
 }
