@@ -1,9 +1,88 @@
 use crate::board::Game;
+use crate::movegen::{ATTACKS, bishop_attacks, rook_attacks};
 use crate::types::*;
 
 pub const PIECE_VALUES: [i32; 6] = [100, 500, 320, 330, 900, 20000];
 
+const PASSED_PAWN_MG: [i32; 8] = [0, 5, 10, 20, 35, 60, 100, 0];
+const PASSED_PAWN_EG: [i32; 8] = [0, 10, 20, 40, 70, 115, 180, 0];
+
+pub struct EvalMasks {
+    pub file_masks: [u64; 8],
+    pub adjacent_files_masks: [u64; 8],
+    pub passed_pawn_masks: [[u64; 64]; 2],
+}
+
+impl EvalMasks {
+    pub const fn init() -> Self {
+        let mut file_masks = [0u64; 8];
+        let mut adjacent_files_masks = [0u64; 8];
+        let mut passed_pawn_masks = [[0u64; 64]; 2];
+
+        let mut f = 0;
+        while f < 8 {
+            let mut mask = 0u64;
+            let mut r = 0;
+            while r < 8 {
+                mask |= 1u64 << (r * 8 + f);
+                r += 1;
+            }
+            file_masks[f] = mask;
+            f += 1;
+        }
+
+        let mut f = 0;
+        while f < 8 {
+            let mut adj = 0u64;
+            if f > 0 {
+                adj |= file_masks[f - 1];
+            }
+            if f < 7 {
+                adj |= file_masks[f + 1];
+            }
+            adjacent_files_masks[f] = adj;
+            f += 1;
+        }
+
+        let mut sq = 0;
+        while sq < 64 {
+            let file = sq % 8;
+            let rank = sq / 8;
+            let files = file_masks[file] | adjacent_files_masks[file];
+
+            // White passed pawn mask: all ranks > rank
+            let mut w_front = 0u64;
+            let mut r = rank + 1;
+            while r < 8 {
+                w_front |= 0xFFu64 << (r * 8);
+                r += 1;
+            }
+            passed_pawn_masks[0][sq] = files & w_front;
+
+            // Black passed pawn mask: all ranks < rank
+            let mut b_front = 0u64;
+            let mut r = 0;
+            while r < rank {
+                b_front |= 0xFFu64 << (r * 8);
+                r += 1;
+            }
+            passed_pawn_masks[1][sq] = files & b_front;
+
+            sq += 1;
+        }
+
+        EvalMasks {
+            file_masks,
+            adjacent_files_masks,
+            passed_pawn_masks,
+        }
+    }
+}
+
+pub static EVAL_MASKS: EvalMasks = EvalMasks::init();
+
 // PeSTO's Piece-Square Tables (MG = Middlegame, EG = Endgame)
+// Laid out from Rank 8 (top, 0..7) to Rank 1 (bottom, 56..63).
 #[rustfmt::skip]
 const MG_PAWN_TABLE: [i32; 64] = [
       0,   0,   0,   0,   0,   0,   0,   0,
@@ -150,115 +229,168 @@ const EG_KING_TABLE: [i32; 64] = [
 
 impl Game {
     pub fn evaluate(&self) -> i32 {
-        let mut mg_white = 0i32;
-        let mut eg_white = 0i32;
-        let mut mg_black = 0i32;
-        let mut eg_black = 0i32;
-        let mut game_phase = 0i32;
-
-        for piece in &self.pieces {
-            if piece.position == 0 {
-                continue;
-            }
-
-            let sq = bit_scan(piece.position);
-            let (mg_val, eg_val, phase_inc) = match piece.piece_type {
-                PieceType::Pawn => {
-                    let table_sq = if piece.colour == Colour::White {
-                        sq
-                    } else {
-                        sq ^ 56
-                    };
-                    (
-                        100 + MG_PAWN_TABLE[table_sq],
-                        100 + EG_PAWN_TABLE[table_sq],
-                        0,
-                    )
-                }
-                PieceType::Knight => {
-                    let table_sq = if piece.colour == Colour::White {
-                        sq
-                    } else {
-                        sq ^ 56
-                    };
-                    (
-                        320 + MG_KNIGHT_TABLE[table_sq],
-                        320 + EG_KNIGHT_TABLE[table_sq],
-                        1,
-                    )
-                }
-                PieceType::Bishop => {
-                    let table_sq = if piece.colour == Colour::White {
-                        sq
-                    } else {
-                        sq ^ 56
-                    };
-                    (
-                        330 + MG_BISHOP_TABLE[table_sq],
-                        330 + EG_BISHOP_TABLE[table_sq],
-                        1,
-                    )
-                }
-                PieceType::Rook => {
-                    let table_sq = if piece.colour == Colour::White {
-                        sq
-                    } else {
-                        sq ^ 56
-                    };
-                    (
-                        500 + MG_ROOK_TABLE[table_sq],
-                        500 + EG_ROOK_TABLE[table_sq],
-                        2,
-                    )
-                }
-                PieceType::Queen => {
-                    let table_sq = if piece.colour == Colour::White {
-                        sq
-                    } else {
-                        sq ^ 56
-                    };
-                    (
-                        900 + MG_QUEEN_TABLE[table_sq],
-                        900 + EG_QUEEN_TABLE[table_sq],
-                        4,
-                    )
-                }
-                PieceType::King => {
-                    let table_sq = if piece.colour == Colour::White {
-                        sq
-                    } else {
-                        sq ^ 56
-                    };
-                    (
-                        20000 + MG_KING_TABLE[table_sq],
-                        20000 + EG_KING_TABLE[table_sq],
-                        0,
-                    )
-                }
-            };
-
-            game_phase += phase_inc;
-
-            if piece.colour == Colour::White {
-                mg_white += mg_val;
-                eg_white += eg_val;
-            } else {
-                mg_black += mg_val;
-                eg_black += eg_val;
-            }
+        if self.is_insufficient_material() {
+            return 0;
         }
 
-        let mg_score = mg_white - mg_black;
-        let eg_score = eg_white - eg_black;
+        let mut mg_scores = [0i32; 2];
+        let mut eg_scores = [0i32; 2];
+        let mut game_phase = 0i32;
+
+        let occ = self.occupied_bb();
+        let all_pawns =
+            self.piece_bb(Colour::White, PieceType::Pawn) | self.piece_bb(Colour::Black, PieceType::Pawn);
+
+        for colour in [Colour::White, Colour::Black] {
+            let c = colour.index();
+            let opp = colour.opponent();
+            let friendly_occ = self.colour_bb(colour);
+            let friendly_pawns = self.piece_bb(colour, PieceType::Pawn);
+            let enemy_pawns = self.piece_bb(opp, PieceType::Pawn);
+
+            let mut mg = 0i32;
+            let mut eg = 0i32;
+
+            // 1. Pawns (Material + PST + Passed + Isolated + Doubled)
+            let mut pawns = friendly_pawns;
+            while pawns != 0 {
+                let sq = bit_scan(pawns);
+                pawns &= pawns - 1;
+                let table_sq = if colour == Colour::White { sq ^ 56 } else { sq };
+                mg += 100 + MG_PAWN_TABLE[table_sq];
+                eg += 100 + EG_PAWN_TABLE[table_sq];
+
+                let file = sq % 8;
+                let rel_rank = if colour == Colour::White {
+                    sq / 8
+                } else {
+                    7 - (sq / 8)
+                };
+
+                // Passed pawn
+                if (EVAL_MASKS.passed_pawn_masks[c][sq] & enemy_pawns) == 0 {
+                    mg += PASSED_PAWN_MG[rel_rank];
+                    eg += PASSED_PAWN_EG[rel_rank];
+                }
+
+                // Isolated pawn
+                if (EVAL_MASKS.adjacent_files_masks[file] & friendly_pawns) == 0 {
+                    mg -= 12;
+                    eg -= 18;
+                }
+            }
+
+            // Doubled pawns penalty per file
+            for f in 0..8 {
+                let count = (friendly_pawns & EVAL_MASKS.file_masks[f]).count_ones();
+                if count > 1 {
+                    let extra = (count - 1) as i32;
+                    mg -= 10 * extra;
+                    eg -= 20 * extra;
+                }
+            }
+
+            // 2. Knights (Material + PST + Mobility)
+            let mut knights = self.piece_bb(colour, PieceType::Knight);
+            while knights != 0 {
+                let sq = bit_scan(knights);
+                knights &= knights - 1;
+                let table_sq = if colour == Colour::White { sq ^ 56 } else { sq };
+                mg += 320 + MG_KNIGHT_TABLE[table_sq];
+                eg += 320 + EG_KNIGHT_TABLE[table_sq];
+                game_phase += 1;
+
+                let mob = (ATTACKS.knight_attacks[sq] & !friendly_occ).count_ones() as i32;
+                mg += (mob - 4) * 3;
+                eg += (mob - 4) * 3;
+            }
+
+            // 3. Bishops (Material + PST + Bishop Pair + Mobility)
+            let mut bishops = self.piece_bb(colour, PieceType::Bishop);
+            if bishops.count_ones() >= 2 {
+                mg += 30;
+                eg += 50;
+            }
+            while bishops != 0 {
+                let sq = bit_scan(bishops);
+                bishops &= bishops - 1;
+                let table_sq = if colour == Colour::White { sq ^ 56 } else { sq };
+                mg += 330 + MG_BISHOP_TABLE[table_sq];
+                eg += 330 + EG_BISHOP_TABLE[table_sq];
+                game_phase += 1;
+
+                let mob = (bishop_attacks(sq, occ) & !friendly_occ).count_ones() as i32;
+                mg += (mob - 6) * 4;
+                eg += (mob - 6) * 4;
+            }
+
+            // 4. Rooks (Material + PST + Open/Semi-Open File + Mobility)
+            let mut rooks = self.piece_bb(colour, PieceType::Rook);
+            while rooks != 0 {
+                let sq = bit_scan(rooks);
+                rooks &= rooks - 1;
+                let table_sq = if colour == Colour::White { sq ^ 56 } else { sq };
+                mg += 500 + MG_ROOK_TABLE[table_sq];
+                eg += 500 + EG_ROOK_TABLE[table_sq];
+                game_phase += 2;
+
+                let file_mask = EVAL_MASKS.file_masks[sq % 8];
+                if (file_mask & all_pawns) == 0 {
+                    mg += 24;
+                    eg += 14;
+                } else if (file_mask & friendly_pawns) == 0 {
+                    mg += 12;
+                    eg += 8;
+                }
+
+                let mob = (rook_attacks(sq, occ) & !friendly_occ).count_ones() as i32;
+                mg += (mob - 7) * 2;
+                eg += (mob - 7) * 3;
+            }
+
+            // 5. Queens (Material + PST)
+            let mut queens = self.piece_bb(colour, PieceType::Queen);
+            while queens != 0 {
+                let sq = bit_scan(queens);
+                queens &= queens - 1;
+                let table_sq = if colour == Colour::White { sq ^ 56 } else { sq };
+                mg += 900 + MG_QUEEN_TABLE[table_sq];
+                eg += 900 + EG_QUEEN_TABLE[table_sq];
+                game_phase += 4;
+            }
+
+            // 6. King (Material + PST + Pawn Shield)
+            let mut kings = self.piece_bb(colour, PieceType::King);
+            while kings != 0 {
+                let sq = bit_scan(kings);
+                kings &= kings - 1;
+                let table_sq = if colour == Colour::White { sq ^ 56 } else { sq };
+                mg += 20000 + MG_KING_TABLE[table_sq];
+                eg += 20000 + EG_KING_TABLE[table_sq];
+
+                // Pawn shield bonus in middlegame
+                let shield = (ATTACKS.king_attacks[sq] & friendly_pawns).count_ones() as i32;
+                mg += shield * 8;
+            }
+
+            mg_scores[c] = mg;
+            eg_scores[c] = eg;
+        }
+
+        let mg_score = mg_scores[0] - mg_scores[1];
+        let eg_score = eg_scores[0] - eg_scores[1];
 
         // Tapered evaluation: total max game phase = 24
         let phase = game_phase.min(24);
         let score = (mg_score * phase + eg_score * (24 - phase)) / 24;
 
-        if self.active_colour == Colour::White {
+        let perspective_score = if self.active_colour == Colour::White {
             score
         } else {
             -score
-        }
+        };
+
+        // Small tempo bonus for the side to move
+        perspective_score + 10
     }
 }

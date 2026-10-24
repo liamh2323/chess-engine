@@ -11,6 +11,7 @@ pub static MOD67TABLE: [usize; 67] = [
     46, 31, 37, 21, 57, 52, 8, 26, 49, 45, 36, 56, 7, 48, 35, 6, 34, 33,
 ];
 
+#[inline]
 pub fn bit_scan(bit: u64) -> usize {
     if bit == 0 {
         return 64;
@@ -75,10 +76,19 @@ pub enum Colour {
 }
 
 impl Colour {
-    pub fn opponent(self) -> Self {
+    #[inline]
+    pub const fn opponent(self) -> Self {
         match self {
             Colour::White => Colour::Black,
             Colour::Black => Colour::White,
+        }
+    }
+
+    #[inline]
+    pub const fn index(self) -> usize {
+        match self {
+            Colour::White => 0,
+            Colour::Black => 1,
         }
     }
 }
@@ -94,6 +104,18 @@ pub enum PieceType {
 }
 
 impl PieceType {
+    #[inline]
+    pub const fn index(self) -> usize {
+        match self {
+            PieceType::Pawn => 0,
+            PieceType::Rook => 1,
+            PieceType::Knight => 2,
+            PieceType::Bishop => 3,
+            PieceType::Queen => 4,
+            PieceType::King => 5,
+        }
+    }
+
     pub fn to_char(self, colour: Colour) -> char {
         let ch = match self {
             PieceType::Pawn => 'p',

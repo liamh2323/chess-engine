@@ -1,12 +1,15 @@
 use std::io::{self, BufRead};
 use std::time::Instant;
 
-use crate::board::{Game, read_FEN};
+use crate::board::{Game, UndoInfo, read_FEN};
 use crate::search::{SearchLimits, Searcher};
+use crate::tt::TranspositionTable;
 use crate::types::*;
 
 pub struct UciHandler {
-    game: Game,
+    pub game: Game,
+    pub tt: TranspositionTable,
+    pub move_history: Vec<(Move, UndoInfo)>,
 }
 
 impl Default for UciHandler {
@@ -19,6 +22,8 @@ impl UciHandler {
     pub fn new() -> Self {
         UciHandler {
             game: Game::initialise(),
+            tt: TranspositionTable::new_mb(16),
+            move_history: Vec::new(),
         }
     }
 
@@ -50,13 +55,20 @@ impl UciHandler {
             "uci" => {
                 println!("id name ChessEngine");
                 println!("id author Liam Hayes");
+                println!("option name Hash type spin default 16 min 1 max 1024");
+                println!("option name Clear Hash type button");
                 println!("uciok");
             }
             "isready" => {
                 println!("readyok");
             }
+            "setoption" => {
+                self.handle_setoption(&tokens[1..]);
+            }
             "ucinewgame" => {
                 self.game = Game::initialise();
+                self.tt.clear();
+                self.move_history.clear();
             }
             "position" => {
                 self.handle_position(&tokens[1..]);
@@ -64,6 +76,7 @@ impl UciHandler {
             "go" => {
                 self.handle_go(&tokens[1..]);
             }
+            "stop" => {}
             "perft" => {
                 let depth = tokens.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
                 self.run_perft(depth);
@@ -90,39 +103,122 @@ impl UciHandler {
                 }
                 println!();
             }
+            "undo" => {
+                if let Some((mv, undo)) = self.move_history.pop() {
+                    self.game.unmake_move(&mv, &undo);
+                    print!("{}", self.game);
+                } else {
+                    println!("No moves to undo.");
+                }
+            }
+            "help" => {
+                println!("Available commands:");
+                println!("  uci                        - Initialize UCI mode");
+                println!("  isready                    - Query engine readiness");
+                println!("  ucinewgame                 - Reset board and clear hash table");
+                println!("  setoption name <N> [value <V>] - Configure UCI option (Hash, Clear Hash)");
+                println!("  position [startpos|fen <FEN>] [moves <m1> <m2> ...]");
+                println!("  go [depth <D>] [movetime <MS>] [wtime <MS>] [btime <MS>] [perft <D>]");
+                println!("  perft <D>                  - Run perft divide to depth D");
+                println!("  d / board                  - Display board and FEN");
+                println!("  eval                       - Display static evaluation");
+                println!("  moves                      - List all legal moves");
+                println!("  undo                       - Undo last move");
+                println!("  <move> (e.g. e2e4)         - Play a move interactively against the engine");
+                println!("  quit / exit                - Exit the program");
+            }
             // If the user types a move directly (e.g. "e2e4")
             candidate_move => {
                 if let Some(mv) = self.parse_move_str(candidate_move) {
-                    let _undo = self.game.make_move(&mv);
+                    let undo = self.game.make_move(&mv);
+                    self.move_history.push((mv, undo));
                     print!("{}", self.game);
 
-                    // Check if game is over
-                    let responses = self.game.generate_legal_moves();
-                    if responses.is_empty() {
-                        if self.game.is_in_check(self.game.active_colour) {
-                            println!("Checkmate! Game over.");
-                        } else {
-                            println!("Stalemate! Game drawn.");
-                        }
-                    } else {
-                        // Engine plays response in interactive mode
-                        println!("Engine thinking...");
-                        let limits = SearchLimits {
-                            max_depth: 8,
-                            time_limit_ms: Some(1500),
-                        };
-                        let mut searcher = Searcher::new(&mut self.game);
-                        let (best_move, _score) = searcher.search(&limits);
-                        if let Some(bm) = best_move {
-                            let _undo = self.game.make_move(&bm);
-                            println!("Engine plays: {}", bm.to_uci());
-                            print!("{}", self.game);
-                        }
+                    if self.check_and_report_game_over() {
+                        return;
+                    }
+
+                    // Engine plays response in interactive mode
+                    println!("Engine thinking...");
+                    let limits = SearchLimits {
+                        max_depth: 8,
+                        time_limit_ms: Some(1500),
+                    };
+                    let mut searcher = Searcher::with_tt(&mut self.game, &mut self.tt);
+                    let (best_move, _score) = searcher.search(&limits);
+                    if let Some(bm) = best_move {
+                        let undo = self.game.make_move(&bm);
+                        self.move_history.push((bm, undo));
+                        println!("Engine plays: {}", bm.to_uci());
+                        print!("{}", self.game);
+                        let _ = self.check_and_report_game_over();
                     }
                 } else {
                     println!("Unknown command: {}", line);
                 }
             }
+        }
+    }
+
+    fn check_and_report_game_over(&mut self) -> bool {
+        let responses = self.game.generate_legal_moves();
+        if responses.is_empty() {
+            if self.game.is_in_check(self.game.active_colour) {
+                println!("Checkmate! Game over.");
+            } else {
+                println!("Stalemate! Game drawn.");
+            }
+            return true;
+        }
+        if self.game.is_threefold_repetition() {
+            println!("Draw by threefold repetition!");
+            return true;
+        }
+        if self.game.is_fifty_move_draw() {
+            println!("Draw by fifty-move rule!");
+            return true;
+        }
+        if self.game.is_insufficient_material() {
+            println!("Draw by insufficient material!");
+            return true;
+        }
+        false
+    }
+
+    fn handle_setoption(&mut self, tokens: &[&str]) {
+        // Format: name <option_name> [value <option_value>]
+        let mut name_parts = Vec::new();
+        let mut value_parts = Vec::new();
+        let mut in_name = false;
+        let mut in_value = false;
+
+        for &tok in tokens {
+            if tok.eq_ignore_ascii_case("name") {
+                in_name = true;
+                in_value = false;
+            } else if tok.eq_ignore_ascii_case("value") {
+                in_name = false;
+                in_value = true;
+            } else if in_name {
+                name_parts.push(tok);
+            } else if in_value {
+                value_parts.push(tok);
+            }
+        }
+
+        let name = name_parts.join(" ").to_ascii_lowercase();
+        let value = value_parts.join(" ");
+
+        match name.as_str() {
+            "hash" => {
+                if let Ok(mb) = value.parse::<usize>() {
+                    self.tt = TranspositionTable::new_mb(mb);
+                }
+            }
+            "clear hash" => {
+                self.tt.clear();
+            }
+            _ => {}
         }
     }
 
@@ -135,6 +231,7 @@ impl UciHandler {
 
         if tokens[0] == "startpos" {
             self.game = Game::initialise();
+            self.move_history.clear();
             if tokens.len() > 1 && tokens[1] == "moves" {
                 move_idx = Some(2);
             }
@@ -148,6 +245,7 @@ impl UciHandler {
             }
             let fen_str = fen_parts.join(" ");
             self.game = read_FEN(&fen_str);
+            self.move_history.clear();
 
             if i < tokens.len() && tokens[i] == "moves" {
                 move_idx = Some(i + 1);
@@ -157,7 +255,8 @@ impl UciHandler {
         if let Some(start) = move_idx {
             for &mv_str in &tokens[start..] {
                 if let Some(mv) = self.parse_move_str(mv_str) {
-                    self.game.make_move(&mv);
+                    let undo = self.game.make_move(&mv);
+                    self.move_history.push((mv, undo));
                 } else {
                     eprintln!("Invalid move in position command: {}", mv_str);
                     break;
@@ -167,6 +266,12 @@ impl UciHandler {
     }
 
     fn handle_go(&mut self, tokens: &[&str]) {
+        if !tokens.is_empty() && tokens[0] == "perft" {
+            let depth = tokens.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
+            self.run_perft(depth);
+            return;
+        }
+
         let mut limits = SearchLimits {
             max_depth: 64,
             time_limit_ms: None,
@@ -176,52 +281,53 @@ impl UciHandler {
         let mut btime: Option<u64> = None;
         let mut winc: u64 = 0;
         let mut binc: u64 = 0;
+        let mut movestogo: u64 = 30;
         let mut movetime: Option<u64> = None;
         let mut depth_limit: Option<usize> = None;
+        let mut infinite = false;
 
         let mut i = 0;
         while i < tokens.len() {
             match tokens[i] {
-                "wtime" => {
-                    if i + 1 < tokens.len() {
-                        wtime = tokens[i + 1].parse().ok();
-                        i += 1;
-                    }
+                "wtime" if i + 1 < tokens.len() => {
+                    wtime = tokens[i + 1].parse().ok();
+                    i += 1;
                 }
-                "btime" => {
-                    if i + 1 < tokens.len() {
-                        btime = tokens[i + 1].parse().ok();
-                        i += 1;
-                    }
+                "btime" if i + 1 < tokens.len() => {
+                    btime = tokens[i + 1].parse().ok();
+                    i += 1;
                 }
-                "winc" => {
-                    if i + 1 < tokens.len() {
-                        winc = tokens[i + 1].parse().unwrap_or(0);
-                        i += 1;
-                    }
+                "winc" if i + 1 < tokens.len() => {
+                    winc = tokens[i + 1].parse().unwrap_or(0);
+                    i += 1;
                 }
-                "binc" => {
-                    if i + 1 < tokens.len() {
-                        binc = tokens[i + 1].parse().unwrap_or(0);
-                        i += 1;
-                    }
+                "binc" if i + 1 < tokens.len() => {
+                    binc = tokens[i + 1].parse().unwrap_or(0);
+                    i += 1;
                 }
-                "movetime" => {
-                    if i + 1 < tokens.len() {
-                        movetime = tokens[i + 1].parse().ok();
-                        i += 1;
-                    }
+                "movestogo" if i + 1 < tokens.len() => {
+                    movestogo = tokens[i + 1].parse().unwrap_or(30).max(1);
+                    i += 1;
+                }
+                "movetime" if i + 1 < tokens.len() => {
+                    movetime = tokens[i + 1].parse().ok();
+                    i += 1;
                 }
                 "depth" if i + 1 < tokens.len() => {
                     depth_limit = tokens[i + 1].parse().ok();
                     i += 1;
+                }
+                "infinite" => {
+                    infinite = true;
                 }
                 _ => {}
             }
             i += 1;
         }
 
-        if let Some(mt) = movetime {
+        if infinite {
+            limits.time_limit_ms = None;
+        } else if let Some(mt) = movetime {
             limits.time_limit_ms = Some(mt);
         } else {
             let (my_time, my_inc) = if self.game.active_colour == Colour::White {
@@ -231,8 +337,9 @@ impl UciHandler {
             };
 
             if let Some(t) = my_time {
-                // Standard time budget: remaining_time / 30 + inc / 2
-                let budget = (t / 30 + my_inc / 2).max(10u64).min(t.saturating_sub(50));
+                let budget = (t / movestogo + my_inc / 2)
+                    .max(10u64)
+                    .min(t.saturating_sub(50));
                 limits.time_limit_ms = Some(budget);
             } else if depth_limit.is_none() {
                 // Default search time for interactive use
@@ -244,7 +351,7 @@ impl UciHandler {
             limits.max_depth = d;
         }
 
-        let mut searcher = Searcher::new(&mut self.game);
+        let mut searcher = Searcher::with_tt(&mut self.game, &mut self.tt);
         let (best_move, _) = searcher.search(&limits);
 
         if let Some(mv) = best_move {

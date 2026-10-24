@@ -1,15 +1,39 @@
 use crate::board::Game;
 use crate::types::*;
 
+pub const DIR_NORTH: usize = 0;
+pub const DIR_EAST: usize = 1;
+pub const DIR_NORTH_EAST: usize = 2;
+pub const DIR_NORTH_WEST: usize = 3;
+pub const DIR_SOUTH: usize = 4;
+pub const DIR_WEST: usize = 5;
+pub const DIR_SOUTH_EAST: usize = 6;
+pub const DIR_SOUTH_WEST: usize = 7;
+
 pub struct AttackTables {
     pub knight_attacks: [u64; 64],
     pub king_attacks: [u64; 64],
+    pub pawn_attacks: [[u64; 64]; 2],
+    pub ray_attacks: [[u64; 64]; 8],
 }
 
 impl AttackTables {
     pub const fn init() -> Self {
         let mut knight_attacks = [0u64; 64];
         let mut king_attacks = [0u64; 64];
+        let mut pawn_attacks = [[0u64; 64]; 2];
+        let mut ray_attacks = [[0u64; 64]; 8];
+
+        let ray_deltas: [(i32, i32); 8] = [
+            (0, 1),   // DIR_NORTH
+            (1, 0),   // DIR_EAST
+            (1, 1),   // DIR_NORTH_EAST
+            (-1, 1),  // DIR_NORTH_WEST
+            (0, -1),  // DIR_SOUTH
+            (-1, 0),  // DIR_WEST
+            (1, -1),  // DIR_SOUTH_EAST
+            (-1, -1), // DIR_SOUTH_WEST
+        ];
 
         let mut sq = 0;
         while sq < 64 {
@@ -64,20 +88,103 @@ impl AttackTables {
             }
             king_attacks[sq] = kg_mask;
 
+            // Pawn attacks (White = 0, Black = 1)
+            let mut wp_mask = 0u64;
+            if rank < 7 {
+                if file > 0 {
+                    wp_mask |= 1u64 << (sq + 7);
+                }
+                if file < 7 {
+                    wp_mask |= 1u64 << (sq + 9);
+                }
+            }
+            pawn_attacks[0][sq] = wp_mask;
+
+            let mut bp_mask = 0u64;
+            if rank > 0 {
+                if file > 0 {
+                    bp_mask |= 1u64 << (sq - 9);
+                }
+                if file < 7 {
+                    bp_mask |= 1u64 << (sq - 7);
+                }
+            }
+            pawn_attacks[1][sq] = bp_mask;
+
+            // Sliding rays
+            let mut dir = 0;
+            while dir < 8 {
+                let (df, dr) = ray_deltas[dir];
+                let mut f = file as i32 + df;
+                let mut r = rank as i32 + dr;
+                let mut r_mask = 0u64;
+                while f >= 0 && f < 8 && r >= 0 && r < 8 {
+                    r_mask |= 1u64 << (r * 8 + f);
+                    f += df;
+                    r += dr;
+                }
+                ray_attacks[dir][sq] = r_mask;
+                dir += 1;
+            }
+
             sq += 1;
         }
 
         AttackTables {
             knight_attacks,
             king_attacks,
+            pawn_attacks,
+            ray_attacks,
         }
     }
 }
 
 pub static ATTACKS: AttackTables = AttackTables::init();
 
-const ROOK_DIRECTIONS: [(i32, i32); 4] = [(0, 1), (0, -1), (1, 0), (-1, 0)];
-const BISHOP_DIRECTIONS: [(i32, i32); 4] = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
+#[inline]
+fn positive_ray_attacks(dir: usize, sq: usize, occupied: u64) -> u64 {
+    let attacks = ATTACKS.ray_attacks[dir][sq];
+    let blockers = attacks & occupied;
+    if blockers != 0 {
+        let first_blocker = blockers.trailing_zeros() as usize;
+        attacks ^ ATTACKS.ray_attacks[dir][first_blocker]
+    } else {
+        attacks
+    }
+}
+
+#[inline]
+fn negative_ray_attacks(dir: usize, sq: usize, occupied: u64) -> u64 {
+    let attacks = ATTACKS.ray_attacks[dir][sq];
+    let blockers = attacks & occupied;
+    if blockers != 0 {
+        let first_blocker = 63 - blockers.leading_zeros() as usize;
+        attacks ^ ATTACKS.ray_attacks[dir][first_blocker]
+    } else {
+        attacks
+    }
+}
+
+#[inline]
+pub fn rook_attacks(sq: usize, occupied: u64) -> u64 {
+    positive_ray_attacks(DIR_NORTH, sq, occupied)
+        | positive_ray_attacks(DIR_EAST, sq, occupied)
+        | negative_ray_attacks(DIR_SOUTH, sq, occupied)
+        | negative_ray_attacks(DIR_WEST, sq, occupied)
+}
+
+#[inline]
+pub fn bishop_attacks(sq: usize, occupied: u64) -> u64 {
+    positive_ray_attacks(DIR_NORTH_EAST, sq, occupied)
+        | positive_ray_attacks(DIR_NORTH_WEST, sq, occupied)
+        | negative_ray_attacks(DIR_SOUTH_EAST, sq, occupied)
+        | negative_ray_attacks(DIR_SOUTH_WEST, sq, occupied)
+}
+
+#[inline]
+pub fn queen_attacks(sq: usize, occupied: u64) -> u64 {
+    rook_attacks(sq, occupied) | bishop_attacks(sq, occupied)
+}
 
 impl Game {
     pub fn is_square_attacked(&self, sq: usize, by_colour: Colour) -> bool {
@@ -85,118 +192,42 @@ impl Game {
             return false;
         }
 
-        // 1. Knight attacks
-        let knights = self.piece_bb(by_colour, PieceType::Knight);
-        if ATTACKS.knight_attacks[sq] & knights != 0 {
+        let opp_idx = by_colour.opponent().index();
+
+        // 1. Pawn attacks
+        if (ATTACKS.pawn_attacks[opp_idx][sq] & self.piece_bb(by_colour, PieceType::Pawn)) != 0 {
             return true;
         }
 
-        // 2. King attacks
-        let kings = self.piece_bb(by_colour, PieceType::King);
-        if ATTACKS.king_attacks[sq] & kings != 0 {
+        // 2. Knight attacks
+        if (ATTACKS.knight_attacks[sq] & self.piece_bb(by_colour, PieceType::Knight)) != 0 {
             return true;
         }
 
-        // 3. Pawn attacks
-        let file = sq % 8;
-        let rank = sq / 8;
-        match by_colour {
-            Colour::White => {
-                if rank > 0 {
-                    if file > 0 {
-                        let from_sq = sq - 9;
-                        if let Square::Occupied(idx) = self.squares[from_sq] {
-                            let p = &self.pieces[idx];
-                            if p.colour == Colour::White && p.piece_type == PieceType::Pawn {
-                                return true;
-                            }
-                        }
-                    }
-                    if file < 7 {
-                        let from_sq = sq - 7;
-                        if let Square::Occupied(idx) = self.squares[from_sq] {
-                            let p = &self.pieces[idx];
-                            if p.colour == Colour::White && p.piece_type == PieceType::Pawn {
-                                return true;
-                            }
-                        }
-                    }
-                }
-            }
-            Colour::Black => {
-                if rank < 7 {
-                    if file > 0 {
-                        let from_sq = sq + 7;
-                        if let Square::Occupied(idx) = self.squares[from_sq] {
-                            let p = &self.pieces[idx];
-                            if p.colour == Colour::Black && p.piece_type == PieceType::Pawn {
-                                return true;
-                            }
-                        }
-                    }
-                    if file < 7 {
-                        let from_sq = sq + 9;
-                        if let Square::Occupied(idx) = self.squares[from_sq] {
-                            let p = &self.pieces[idx];
-                            if p.colour == Colour::Black && p.piece_type == PieceType::Pawn {
-                                return true;
-                            }
-                        }
-                    }
-                }
-            }
+        // 3. King attacks
+        if (ATTACKS.king_attacks[sq] & self.piece_bb(by_colour, PieceType::King)) != 0 {
+            return true;
         }
+
+        let occ = self.occupied_bb();
+        let queens = self.piece_bb(by_colour, PieceType::Queen);
 
         // 4. Straight sliding attacks (Rooks and Queens)
-        for &(df, dr) in &ROOK_DIRECTIONS {
-            let mut f = file as i32 + df;
-            let mut r = rank as i32 + dr;
-            while (0..8).contains(&f) && (0..8).contains(&r) {
-                let target_sq = (r * 8 + f) as usize;
-                match self.squares[target_sq] {
-                    Square::Empty => {}
-                    Square::Occupied(idx) => {
-                        let p = &self.pieces[idx];
-                        if p.colour == by_colour
-                            && (p.piece_type == PieceType::Rook || p.piece_type == PieceType::Queen)
-                        {
-                            return true;
-                        }
-                        break;
-                    }
-                }
-                f += df;
-                r += dr;
-            }
+        let rooks_queens = self.piece_bb(by_colour, PieceType::Rook) | queens;
+        if rooks_queens != 0 && (rook_attacks(sq, occ) & rooks_queens) != 0 {
+            return true;
         }
 
         // 5. Diagonal sliding attacks (Bishops and Queens)
-        for &(df, dr) in &BISHOP_DIRECTIONS {
-            let mut f = file as i32 + df;
-            let mut r = rank as i32 + dr;
-            while (0..8).contains(&f) && (0..8).contains(&r) {
-                let target_sq = (r * 8 + f) as usize;
-                match self.squares[target_sq] {
-                    Square::Empty => {}
-                    Square::Occupied(idx) => {
-                        let p = &self.pieces[idx];
-                        if p.colour == by_colour
-                            && (p.piece_type == PieceType::Bishop
-                                || p.piece_type == PieceType::Queen)
-                        {
-                            return true;
-                        }
-                        break;
-                    }
-                }
-                f += df;
-                r += dr;
-            }
+        let bishops_queens = self.piece_bb(by_colour, PieceType::Bishop) | queens;
+        if bishops_queens != 0 && (bishop_attacks(sq, occ) & bishops_queens) != 0 {
+            return true;
         }
 
         false
     }
 
+    #[inline]
     pub fn is_in_check(&self, colour: Colour) -> bool {
         let king_sq = self.king_square(colour);
         if king_sq >= 64 {
@@ -210,382 +241,349 @@ impl Game {
         let us = self.active_colour;
         let them = us.opponent();
         let friendly_occ = self.colour_bb(us);
+        let enemy_occ = self.colour_bb(them);
+        let occ = self.occupied_bb();
 
-        for piece in &self.pieces {
-            if piece.position == 0 || piece.colour != us {
-                continue;
-            }
-
-            let from_sq = bit_scan(piece.position);
+        // 1. Pawns
+        let mut pawns = self.piece_bb(us, PieceType::Pawn);
+        while pawns != 0 {
+            let from_sq = bit_scan(pawns);
+            pawns &= pawns - 1;
             let file = from_sq % 8;
             let rank = from_sq / 8;
 
-            match piece.piece_type {
-                PieceType::Pawn => {
-                    if us == Colour::White {
-                        // Single step
-                        let one_step = from_sq + 8;
-                        if self.squares[one_step] == Square::Empty {
-                            if rank == 6 {
-                                for promo in [
-                                    PieceType::Queen,
-                                    PieceType::Rook,
-                                    PieceType::Bishop,
-                                    PieceType::Knight,
-                                ] {
-                                    moves.push(Move {
-                                        from: from_sq,
-                                        to: one_step,
-                                        promotion: Some(promo),
-                                        is_en_passant: false,
-                                        is_castling: false,
-                                    });
-                                }
-                            } else {
-                                moves.push(Move::new(from_sq, one_step));
-                                // Double step
-                                if rank == 1 {
-                                    let two_step = from_sq + 16;
-                                    if self.squares[two_step] == Square::Empty {
-                                        moves.push(Move::new(from_sq, two_step));
-                                    }
-                                }
-                            }
-                        }
-
-                        // Left capture
-                        if file > 0 {
-                            let to_sq = from_sq + 7;
-                            if let Square::Occupied(cap_idx) = self.squares[to_sq] {
-                                if self.pieces[cap_idx].colour == them {
-                                    if rank == 6 {
-                                        for promo in [
-                                            PieceType::Queen,
-                                            PieceType::Rook,
-                                            PieceType::Bishop,
-                                            PieceType::Knight,
-                                        ] {
-                                            moves.push(Move {
-                                                from: from_sq,
-                                                to: to_sq,
-                                                promotion: Some(promo),
-                                                is_en_passant: false,
-                                                is_castling: false,
-                                            });
-                                        }
-                                    } else {
-                                        moves.push(Move::new(from_sq, to_sq));
-                                    }
-                                }
-                            } else if self.en_passant == Some(1u64 << to_sq) {
-                                moves.push(Move {
-                                    from: from_sq,
-                                    to: to_sq,
-                                    promotion: None,
-                                    is_en_passant: true,
-                                    is_castling: false,
-                                });
-                            }
-                        }
-
-                        // Right capture
-                        if file < 7 {
-                            let to_sq = from_sq + 9;
-                            if let Square::Occupied(cap_idx) = self.squares[to_sq] {
-                                if self.pieces[cap_idx].colour == them {
-                                    if rank == 6 {
-                                        for promo in [
-                                            PieceType::Queen,
-                                            PieceType::Rook,
-                                            PieceType::Bishop,
-                                            PieceType::Knight,
-                                        ] {
-                                            moves.push(Move {
-                                                from: from_sq,
-                                                to: to_sq,
-                                                promotion: Some(promo),
-                                                is_en_passant: false,
-                                                is_castling: false,
-                                            });
-                                        }
-                                    } else {
-                                        moves.push(Move::new(from_sq, to_sq));
-                                    }
-                                }
-                            } else if self.en_passant == Some(1u64 << to_sq) {
-                                moves.push(Move {
-                                    from: from_sq,
-                                    to: to_sq,
-                                    promotion: None,
-                                    is_en_passant: true,
-                                    is_castling: false,
-                                });
-                            }
+            if us == Colour::White {
+                let one_step = from_sq + 8;
+                if (occ & (1u64 << one_step)) == 0 {
+                    if rank == 6 {
+                        for promo in [
+                            PieceType::Queen,
+                            PieceType::Rook,
+                            PieceType::Bishop,
+                            PieceType::Knight,
+                        ] {
+                            moves.push(Move {
+                                from: from_sq,
+                                to: one_step,
+                                promotion: Some(promo),
+                                is_en_passant: false,
+                                is_castling: false,
+                            });
                         }
                     } else {
-                        // Black pawns
-                        // Single step
-                        let one_step = from_sq - 8;
-                        if self.squares[one_step] == Square::Empty {
-                            if rank == 1 {
-                                for promo in [
-                                    PieceType::Queen,
-                                    PieceType::Rook,
-                                    PieceType::Bishop,
-                                    PieceType::Knight,
-                                ] {
-                                    moves.push(Move {
-                                        from: from_sq,
-                                        to: one_step,
-                                        promotion: Some(promo),
-                                        is_en_passant: false,
-                                        is_castling: false,
-                                    });
-                                }
-                            } else {
-                                moves.push(Move::new(from_sq, one_step));
-                                // Double step
-                                if rank == 6 {
-                                    let two_step = from_sq - 16;
-                                    if self.squares[two_step] == Square::Empty {
-                                        moves.push(Move::new(from_sq, two_step));
-                                    }
-                                }
+                        moves.push(Move::new(from_sq, one_step));
+                        if rank == 1 {
+                            let two_step = from_sq + 16;
+                            if (occ & (1u64 << two_step)) == 0 {
+                                moves.push(Move::new(from_sq, two_step));
                             }
                         }
+                    }
+                }
 
-                        // Left capture (file - 1)
-                        if file > 0 {
-                            let to_sq = from_sq - 9;
-                            if let Square::Occupied(cap_idx) = self.squares[to_sq] {
-                                if self.pieces[cap_idx].colour == them {
-                                    if rank == 1 {
-                                        for promo in [
-                                            PieceType::Queen,
-                                            PieceType::Rook,
-                                            PieceType::Bishop,
-                                            PieceType::Knight,
-                                        ] {
-                                            moves.push(Move {
-                                                from: from_sq,
-                                                to: to_sq,
-                                                promotion: Some(promo),
-                                                is_en_passant: false,
-                                                is_castling: false,
-                                            });
-                                        }
-                                    } else {
-                                        moves.push(Move::new(from_sq, to_sq));
-                                    }
-                                }
-                            } else if self.en_passant == Some(1u64 << to_sq) {
+                // Captures
+                if file > 0 {
+                    let to_sq = from_sq + 7;
+                    let to_bit = 1u64 << to_sq;
+                    if (enemy_occ & to_bit) != 0 {
+                        if rank == 6 {
+                            for promo in [
+                                PieceType::Queen,
+                                PieceType::Rook,
+                                PieceType::Bishop,
+                                PieceType::Knight,
+                            ] {
                                 moves.push(Move {
                                     from: from_sq,
                                     to: to_sq,
-                                    promotion: None,
-                                    is_en_passant: true,
+                                    promotion: Some(promo),
+                                    is_en_passant: false,
                                     is_castling: false,
                                 });
                             }
+                        } else {
+                            moves.push(Move::new(from_sq, to_sq));
                         }
+                    } else if self.en_passant == Some(to_bit) {
+                        moves.push(Move {
+                            from: from_sq,
+                            to: to_sq,
+                            promotion: None,
+                            is_en_passant: true,
+                            is_castling: false,
+                        });
+                    }
+                }
 
-                        // Right capture (file + 1)
-                        if file < 7 {
-                            let to_sq = from_sq - 7;
-                            if let Square::Occupied(cap_idx) = self.squares[to_sq] {
-                                if self.pieces[cap_idx].colour == them {
-                                    if rank == 1 {
-                                        for promo in [
-                                            PieceType::Queen,
-                                            PieceType::Rook,
-                                            PieceType::Bishop,
-                                            PieceType::Knight,
-                                        ] {
-                                            moves.push(Move {
-                                                from: from_sq,
-                                                to: to_sq,
-                                                promotion: Some(promo),
-                                                is_en_passant: false,
-                                                is_castling: false,
-                                            });
-                                        }
-                                    } else {
-                                        moves.push(Move::new(from_sq, to_sq));
-                                    }
-                                }
-                            } else if self.en_passant == Some(1u64 << to_sq) {
+                if file < 7 {
+                    let to_sq = from_sq + 9;
+                    let to_bit = 1u64 << to_sq;
+                    if (enemy_occ & to_bit) != 0 {
+                        if rank == 6 {
+                            for promo in [
+                                PieceType::Queen,
+                                PieceType::Rook,
+                                PieceType::Bishop,
+                                PieceType::Knight,
+                            ] {
                                 moves.push(Move {
                                     from: from_sq,
                                     to: to_sq,
-                                    promotion: None,
-                                    is_en_passant: true,
+                                    promotion: Some(promo),
+                                    is_en_passant: false,
                                     is_castling: false,
                                 });
                             }
+                        } else {
+                            moves.push(Move::new(from_sq, to_sq));
                         }
+                    } else if self.en_passant == Some(to_bit) {
+                        moves.push(Move {
+                            from: from_sq,
+                            to: to_sq,
+                            promotion: None,
+                            is_en_passant: true,
+                            is_castling: false,
+                        });
                     }
                 }
-
-                PieceType::Knight => {
-                    let mut targets = ATTACKS.knight_attacks[from_sq] & !friendly_occ;
-                    while targets != 0 {
-                        let to_sq = bit_scan(targets);
-                        targets &= targets - 1;
-                        moves.push(Move::new(from_sq, to_sq));
-                    }
-                }
-
-                PieceType::King => {
-                    let mut targets = ATTACKS.king_attacks[from_sq] & !friendly_occ;
-                    while targets != 0 {
-                        let to_sq = bit_scan(targets);
-                        targets &= targets - 1;
-                        moves.push(Move::new(from_sq, to_sq));
-                    }
-
-                    // Castling
-                    if us == Colour::White && from_sq == 4 {
-                        // Kingside
-                        if self.castling_rights.contains(CastlingRights::WHITEKINGSIDE)
-                            && self.squares[5] == Square::Empty
-                            && self.squares[6] == Square::Empty
-                            && !self.is_square_attacked(4, Colour::Black)
-                            && !self.is_square_attacked(5, Colour::Black)
-                            && !self.is_square_attacked(6, Colour::Black)
-                            && let Square::Occupied(r_idx) = self.squares[7]
-                        {
-                            let r = &self.pieces[r_idx];
-                            if r.colour == Colour::White && r.piece_type == PieceType::Rook {
-                                moves.push(Move {
-                                    from: 4,
-                                    to: 6,
-                                    promotion: None,
-                                    is_en_passant: false,
-                                    is_castling: true,
-                                });
-                            }
+            } else {
+                // Black pawns
+                let one_step = from_sq - 8;
+                if (occ & (1u64 << one_step)) == 0 {
+                    if rank == 1 {
+                        for promo in [
+                            PieceType::Queen,
+                            PieceType::Rook,
+                            PieceType::Bishop,
+                            PieceType::Knight,
+                        ] {
+                            moves.push(Move {
+                                from: from_sq,
+                                to: one_step,
+                                promotion: Some(promo),
+                                is_en_passant: false,
+                                is_castling: false,
+                            });
                         }
-
-                        // Queenside
-                        if self
-                            .castling_rights
-                            .contains(CastlingRights::WHITEQUEENSIDE)
-                            && self.squares[1] == Square::Empty
-                            && self.squares[2] == Square::Empty
-                            && self.squares[3] == Square::Empty
-                            && !self.is_square_attacked(4, Colour::Black)
-                            && !self.is_square_attacked(3, Colour::Black)
-                            && !self.is_square_attacked(2, Colour::Black)
-                            && let Square::Occupied(r_idx) = self.squares[0]
-                        {
-                            let r = &self.pieces[r_idx];
-                            if r.colour == Colour::White && r.piece_type == PieceType::Rook {
-                                moves.push(Move {
-                                    from: 4,
-                                    to: 2,
-                                    promotion: None,
-                                    is_en_passant: false,
-                                    is_castling: true,
-                                });
-                            }
-                        }
-                    } else if us == Colour::Black && from_sq == 60 {
-                        // Kingside
-                        if self.castling_rights.contains(CastlingRights::BLACKKINGSIDE)
-                            && self.squares[61] == Square::Empty
-                            && self.squares[62] == Square::Empty
-                            && !self.is_square_attacked(60, Colour::White)
-                            && !self.is_square_attacked(61, Colour::White)
-                            && !self.is_square_attacked(62, Colour::White)
-                            && let Square::Occupied(r_idx) = self.squares[63]
-                        {
-                            let r = &self.pieces[r_idx];
-                            if r.colour == Colour::Black && r.piece_type == PieceType::Rook {
-                                moves.push(Move {
-                                    from: 60,
-                                    to: 62,
-                                    promotion: None,
-                                    is_en_passant: false,
-                                    is_castling: true,
-                                });
-                            }
-                        }
-
-                        // Queenside
-                        if self
-                            .castling_rights
-                            .contains(CastlingRights::BLACKQUEENSIDE)
-                            && self.squares[57] == Square::Empty
-                            && self.squares[58] == Square::Empty
-                            && self.squares[59] == Square::Empty
-                            && !self.is_square_attacked(60, Colour::White)
-                            && !self.is_square_attacked(59, Colour::White)
-                            && !self.is_square_attacked(58, Colour::White)
-                            && let Square::Occupied(r_idx) = self.squares[56]
-                        {
-                            let r = &self.pieces[r_idx];
-                            if r.colour == Colour::Black && r.piece_type == PieceType::Rook {
-                                moves.push(Move {
-                                    from: 60,
-                                    to: 58,
-                                    promotion: None,
-                                    is_en_passant: false,
-                                    is_castling: true,
-                                });
+                    } else {
+                        moves.push(Move::new(from_sq, one_step));
+                        if rank == 6 {
+                            let two_step = from_sq - 16;
+                            if (occ & (1u64 << two_step)) == 0 {
+                                moves.push(Move::new(from_sq, two_step));
                             }
                         }
                     }
                 }
 
-                PieceType::Bishop => {
-                    self.generate_ray_moves(from_sq, &BISHOP_DIRECTIONS, them, &mut moves);
+                // Captures
+                if file > 0 {
+                    let to_sq = from_sq - 9;
+                    let to_bit = 1u64 << to_sq;
+                    if (enemy_occ & to_bit) != 0 {
+                        if rank == 1 {
+                            for promo in [
+                                PieceType::Queen,
+                                PieceType::Rook,
+                                PieceType::Bishop,
+                                PieceType::Knight,
+                            ] {
+                                moves.push(Move {
+                                    from: from_sq,
+                                    to: to_sq,
+                                    promotion: Some(promo),
+                                    is_en_passant: false,
+                                    is_castling: false,
+                                });
+                            }
+                        } else {
+                            moves.push(Move::new(from_sq, to_sq));
+                        }
+                    } else if self.en_passant == Some(to_bit) {
+                        moves.push(Move {
+                            from: from_sq,
+                            to: to_sq,
+                            promotion: None,
+                            is_en_passant: true,
+                            is_castling: false,
+                        });
+                    }
                 }
 
-                PieceType::Rook => {
-                    self.generate_ray_moves(from_sq, &ROOK_DIRECTIONS, them, &mut moves);
+                if file < 7 {
+                    let to_sq = from_sq - 7;
+                    let to_bit = 1u64 << to_sq;
+                    if (enemy_occ & to_bit) != 0 {
+                        if rank == 1 {
+                            for promo in [
+                                PieceType::Queen,
+                                PieceType::Rook,
+                                PieceType::Bishop,
+                                PieceType::Knight,
+                            ] {
+                                moves.push(Move {
+                                    from: from_sq,
+                                    to: to_sq,
+                                    promotion: Some(promo),
+                                    is_en_passant: false,
+                                    is_castling: false,
+                                });
+                            }
+                        } else {
+                            moves.push(Move::new(from_sq, to_sq));
+                        }
+                    } else if self.en_passant == Some(to_bit) {
+                        moves.push(Move {
+                            from: from_sq,
+                            to: to_sq,
+                            promotion: None,
+                            is_en_passant: true,
+                            is_castling: false,
+                        });
+                    }
+                }
+            }
+        }
+
+        // 2. Knights
+        let mut knights = self.piece_bb(us, PieceType::Knight);
+        while knights != 0 {
+            let from_sq = bit_scan(knights);
+            knights &= knights - 1;
+            let mut targets = ATTACKS.knight_attacks[from_sq] & !friendly_occ;
+            while targets != 0 {
+                let to_sq = bit_scan(targets);
+                targets &= targets - 1;
+                moves.push(Move::new(from_sq, to_sq));
+            }
+        }
+
+        // 3. Bishops
+        let mut bishops = self.piece_bb(us, PieceType::Bishop);
+        while bishops != 0 {
+            let from_sq = bit_scan(bishops);
+            bishops &= bishops - 1;
+            let mut targets = bishop_attacks(from_sq, occ) & !friendly_occ;
+            while targets != 0 {
+                let to_sq = bit_scan(targets);
+                targets &= targets - 1;
+                moves.push(Move::new(from_sq, to_sq));
+            }
+        }
+
+        // 4. Rooks
+        let mut rooks = self.piece_bb(us, PieceType::Rook);
+        while rooks != 0 {
+            let from_sq = bit_scan(rooks);
+            rooks &= rooks - 1;
+            let mut targets = rook_attacks(from_sq, occ) & !friendly_occ;
+            while targets != 0 {
+                let to_sq = bit_scan(targets);
+                targets &= targets - 1;
+                moves.push(Move::new(from_sq, to_sq));
+            }
+        }
+
+        // 5. Queens
+        let mut queens = self.piece_bb(us, PieceType::Queen);
+        while queens != 0 {
+            let from_sq = bit_scan(queens);
+            queens &= queens - 1;
+            let mut targets = queen_attacks(from_sq, occ) & !friendly_occ;
+            while targets != 0 {
+                let to_sq = bit_scan(targets);
+                targets &= targets - 1;
+                moves.push(Move::new(from_sq, to_sq));
+            }
+        }
+
+        // 6. King
+        let mut kings = self.piece_bb(us, PieceType::King);
+        while kings != 0 {
+            let from_sq = bit_scan(kings);
+            kings &= kings - 1;
+            let mut targets = ATTACKS.king_attacks[from_sq] & !friendly_occ;
+            while targets != 0 {
+                let to_sq = bit_scan(targets);
+                targets &= targets - 1;
+                moves.push(Move::new(from_sq, to_sq));
+            }
+
+            // Castling
+            let our_rooks = self.piece_bb(us, PieceType::Rook);
+            if us == Colour::White && from_sq == 4 {
+                if self.castling_rights.contains(CastlingRights::WHITEKINGSIDE)
+                    && (occ & ((1u64 << 5) | (1u64 << 6))) == 0
+                    && (our_rooks & (1u64 << 7)) != 0
+                    && !self.is_square_attacked(4, Colour::Black)
+                    && !self.is_square_attacked(5, Colour::Black)
+                    && !self.is_square_attacked(6, Colour::Black)
+                {
+                    moves.push(Move {
+                        from: 4,
+                        to: 6,
+                        promotion: None,
+                        is_en_passant: false,
+                        is_castling: true,
+                    });
                 }
 
-                PieceType::Queen => {
-                    self.generate_ray_moves(from_sq, &ROOK_DIRECTIONS, them, &mut moves);
-                    self.generate_ray_moves(from_sq, &BISHOP_DIRECTIONS, them, &mut moves);
+                if self
+                    .castling_rights
+                    .contains(CastlingRights::WHITEQUEENSIDE)
+                    && (occ & ((1u64 << 1) | (1u64 << 2) | (1u64 << 3))) == 0
+                    && (our_rooks & (1u64 << 0)) != 0
+                    && !self.is_square_attacked(4, Colour::Black)
+                    && !self.is_square_attacked(3, Colour::Black)
+                    && !self.is_square_attacked(2, Colour::Black)
+                {
+                    moves.push(Move {
+                        from: 4,
+                        to: 2,
+                        promotion: None,
+                        is_en_passant: false,
+                        is_castling: true,
+                    });
+                }
+            } else if us == Colour::Black && from_sq == 60 {
+                if self.castling_rights.contains(CastlingRights::BLACKKINGSIDE)
+                    && (occ & ((1u64 << 61) | (1u64 << 62))) == 0
+                    && (our_rooks & (1u64 << 63)) != 0
+                    && !self.is_square_attacked(60, Colour::White)
+                    && !self.is_square_attacked(61, Colour::White)
+                    && !self.is_square_attacked(62, Colour::White)
+                {
+                    moves.push(Move {
+                        from: 60,
+                        to: 62,
+                        promotion: None,
+                        is_en_passant: false,
+                        is_castling: true,
+                    });
+                }
+
+                if self
+                    .castling_rights
+                    .contains(CastlingRights::BLACKQUEENSIDE)
+                    && (occ & ((1u64 << 57) | (1u64 << 58) | (1u64 << 59))) == 0
+                    && (our_rooks & (1u64 << 56)) != 0
+                    && !self.is_square_attacked(60, Colour::White)
+                    && !self.is_square_attacked(59, Colour::White)
+                    && !self.is_square_attacked(58, Colour::White)
+                {
+                    moves.push(Move {
+                        from: 60,
+                        to: 58,
+                        promotion: None,
+                        is_en_passant: false,
+                        is_castling: true,
+                    });
                 }
             }
         }
 
         moves
-    }
-
-    fn generate_ray_moves(
-        &self,
-        from_sq: usize,
-        directions: &[(i32, i32)],
-        enemy_colour: Colour,
-        moves: &mut Vec<Move>,
-    ) {
-        let file = (from_sq % 8) as i32;
-        let rank = (from_sq / 8) as i32;
-
-        for &(df, dr) in directions {
-            let mut f = file + df;
-            let mut r = rank + dr;
-
-            while (0..8).contains(&f) && (0..8).contains(&r) {
-                let to_sq = (r * 8 + f) as usize;
-                match self.squares[to_sq] {
-                    Square::Empty => {
-                        moves.push(Move::new(from_sq, to_sq));
-                    }
-                    Square::Occupied(idx) => {
-                        if self.pieces[idx].colour == enemy_colour {
-                            moves.push(Move::new(from_sq, to_sq));
-                        }
-                        break;
-                    }
-                }
-                f += df;
-                r += dr;
-            }
-        }
     }
 
     pub fn generate_legal_moves(&mut self) -> Vec<Move> {

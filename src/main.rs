@@ -2,8 +2,10 @@ pub mod board;
 pub mod eval;
 pub mod movegen;
 pub mod search;
+pub mod tt;
 pub mod types;
 pub mod uci;
+pub mod zobrist;
 
 // Re-export all original types and functions so existing API remains intact
 pub use board::{Game, UndoInfo, read_FEN, split_on};
@@ -69,6 +71,7 @@ mod tests {
         assert_eq!(game_init.en_passant, game_fen.en_passant);
         assert_eq!(game_init.halfmove_clock, game_fen.halfmove_clock);
         assert_eq!(game_init.fullmove_clock, game_fen.fullmove_clock);
+        assert_eq!(game_init.zobrist_hash, game_fen.zobrist_hash);
         assert_eq!(game_init.to_fen(), game_fen.to_fen());
     }
 
@@ -132,6 +135,100 @@ mod tests {
     }
 
     #[test]
+    fn test_zobrist_incremental_consistency() {
+        fn verify_tree(game: &mut Game, depth: usize) {
+            assert_eq!(game.zobrist_hash, game.compute_zobrist());
+            if depth == 0 {
+                return;
+            }
+            let moves = game.generate_legal_moves();
+            for mv in moves {
+                let before_hash = game.zobrist_hash;
+                let undo = game.make_move(&mv);
+                verify_tree(game, depth - 1);
+                game.unmake_move(&mv, &undo);
+                assert_eq!(game.zobrist_hash, before_hash);
+            }
+        }
+
+        let mut kiwipete =
+            read_FEN("r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1");
+        verify_tree(&mut kiwipete, 2);
+
+        let mut promo_pos =
+            read_FEN("rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8");
+        verify_tree(&mut promo_pos, 2);
+    }
+
+    #[test]
+    fn test_pawn_promotions() {
+        let mut game = read_FEN("8/P7/8/8/8/8/8/k6K w - - 0 1");
+        let moves = game.generate_legal_moves();
+        let promo_moves: Vec<_> = moves.iter().filter(|m| m.promotion.is_some()).collect();
+        assert_eq!(promo_moves.len(), 4);
+
+        let mut handler = UciHandler::new();
+        handler.handle_command("position fen 8/P7/8/8/8/8/8/k6K w - - 0 1 moves a7a8q");
+        assert_eq!(handler.game.to_fen(), "Q7/8/8/8/8/8/8/k6K b - - 0 1");
+    }
+
+    #[test]
+    fn test_en_passant_and_castling() {
+        // En passant execution
+        let mut handler = UciHandler::new();
+        handler.handle_command("position startpos moves e2e4 a7a6 e4e5 d7d5 e5d6");
+        assert_eq!(
+            handler.game.to_fen(),
+            "rnbqkbnr/1pp1pppp/p2P4/8/8/8/PPPP1PPP/RNBQKBNR b KQkq - 0 3"
+        );
+
+        // Castling kingside and queenside
+        let mut castle_game = read_FEN("r3k2r/8/8/8/8/8/8/R3K2R w KQkq - 0 1");
+        let legal = castle_game.generate_legal_moves();
+        assert!(legal.iter().any(|m| m.to_uci() == "e1g1" && m.is_castling));
+        assert!(legal.iter().any(|m| m.to_uci() == "e1c1" && m.is_castling));
+    }
+
+    #[test]
+    fn test_draw_detection() {
+        // 1. Insufficient material
+        let k_vs_k = read_FEN("8/8/4k3/8/8/4K3/8/8 w - - 0 1");
+        assert!(k_vs_k.is_insufficient_material());
+
+        let kb_vs_k = read_FEN("8/8/4k3/8/8/4K1B1/8/8 w - - 0 1");
+        assert!(kb_vs_k.is_insufficient_material());
+
+        let kr_vs_k = read_FEN("8/8/4k3/8/8/4K1R1/8/8 w - - 0 1");
+        assert!(!kr_vs_k.is_insufficient_material());
+
+        // 2. Threefold repetition
+        let mut handler = UciHandler::new();
+        handler.handle_command(
+            "position startpos moves g1f3 g8f6 f3g1 f6g8 g1f3 g8f6 f3g1 f6g8",
+        );
+        assert!(handler.game.is_threefold_repetition());
+        assert!(handler.game.is_draw());
+
+        // 3. Fifty-move rule
+        let fifty = read_FEN("8/8/4k3/8/8/4K1R1/8/8 w - - 100 75");
+        assert!(fifty.is_fifty_move_draw());
+        assert!(fifty.is_draw());
+    }
+
+    #[test]
+    fn test_checkmate_and_stalemate() {
+        // Fool's mate
+        let mut fools = read_FEN("rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 1 3");
+        assert!(fools.generate_legal_moves().is_empty());
+        assert!(fools.is_in_check(Colour::White));
+
+        // Stalemate
+        let mut stalemate = read_FEN("7k/5Q2/6K1/8/8/8/8/8 b - - 0 1");
+        assert!(stalemate.generate_legal_moves().is_empty());
+        assert!(!stalemate.is_in_check(Colour::Black));
+    }
+
+    #[test]
     fn test_search_finds_mate_in_one() {
         // Scholar's mate delivery: Qxf7#
         let mut game =
@@ -147,5 +244,18 @@ mod tests {
         assert!(score > search::MATE_SCORE - 10);
     }
 
-    
+    #[test]
+    fn test_search_finds_mate_in_two() {
+        // White to move and mate in 2: 1. Re8+ Rxe8 2. Rxe8#
+        let mut game = read_FEN("r5k1/5ppp/8/8/8/8/4RPPP/4R1K1 w - - 0 1");
+        let mut searcher = search::Searcher::new(&mut game);
+        let limits = search::SearchLimits {
+            max_depth: 4,
+            time_limit_ms: Some(2000),
+        };
+        let (mv, score) = searcher.search(&limits);
+        assert_eq!(mv.unwrap().to_uci(), "e2e8");
+        assert!(score > search::MATE_SCORE - 10);
+        assert!(searcher.pv_line().len() >= 2);
+    }
 }
