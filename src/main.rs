@@ -33,9 +33,9 @@ fn main() {
                 return;
             }
             "bench" => {
-                println!("Running engine benchmark...");
-                handler.handle_command("ucinewgame");
-                handler.handle_command("go depth 6");
+                let depth = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(6);
+                println!("Running engine benchmark (depth {})...", depth);
+                handler.run_bench(depth);
                 return;
             }
             _ => {}
@@ -257,5 +257,67 @@ mod tests {
         assert_eq!(mv.unwrap().to_uci(), "e2e8");
         assert!(score > search::MATE_SCORE - 10);
         assert!(searcher.pv_line().len() >= 2);
+    }
+
+    #[test]
+    fn test_static_exchange_evaluation() {
+        // 1. Queen captures pawn defended by pawn -> loses 800 cp (100 - 900)
+        let mut game1 = read_FEN("4k3/8/3p4/4p3/8/4Q3/8/4K3 w - - 0 1");
+        let qxe5 = game1.parse_move("e3e5").unwrap();
+        assert_eq!(game1.see(&qxe5), -800);
+        assert!(!game1.see_ge(&qxe5, 0));
+
+        // 2. Rook captures pawn defended by Queen, backed up by another Rook (X-ray) -> wins 100 cp
+        let mut game2 = read_FEN("4q1k1/8/8/4p3/8/4R3/4R3/6K1 w - - 0 1");
+        let rxe5 = game2.parse_move("e3e5").unwrap();
+        assert_eq!(game2.see(&rxe5), 100);
+        assert!(game2.see_ge(&rxe5, 0));
+    }
+
+    #[test]
+    fn test_san_generation_and_parsing() {
+        let mut game = Game::initialise();
+        let nf3 = game.parse_move("Nf3").unwrap();
+        assert_eq!(nf3.to_uci(), "g1f3");
+        assert_eq!(game.move_to_san(&nf3), "Nf3");
+
+        // Castling and checkmate SAN
+        let mut scholars =
+            read_FEN("r1bqkb1r/pppp1ppp/2n5/4p3/2B1n3/5Q2/PPPP1PPP/RNB1K1NR w KQkq - 0 4");
+        let mate_mv = scholars.parse_move("Qxf7#").unwrap();
+        assert_eq!(mate_mv.to_uci(), "f3f7");
+        assert_eq!(scholars.move_to_san(&mate_mv), "Qxf7#");
+
+        // Disambiguation: two rooks on a1 and f1, both can move to d1
+        let mut rooks = read_FEN("4k3/8/8/8/8/8/8/R4RK1 w - - 0 1");
+        let rad1 = rooks.parse_move("Rad1").unwrap();
+        let rfd1 = rooks.parse_move("Rfd1").unwrap();
+        assert_eq!(rad1.to_uci(), "a1d1");
+        assert_eq!(rfd1.to_uci(), "f1d1");
+        assert_eq!(rooks.move_to_san(&rad1), "Rad1");
+        assert_eq!(rooks.move_to_san(&rfd1), "Rfd1");
+    }
+
+    #[test]
+    fn test_single_legal_move_root_score() {
+        // White is in check from Black rook on b1; only legal move is 1. Nxb1# (discovered checkmate!)
+        let mut single_reply = read_FEN("6bk/7p/8/8/4b3/2N5/PB6/Kr6 w - - 0 1");
+        assert_eq!(single_reply.generate_legal_moves().len(), 1);
+        let mut searcher = search::Searcher::new(&mut single_reply);
+        let limits = search::SearchLimits {
+            max_depth: 3,
+            time_limit_ms: Some(1000),
+        };
+        let (mv, score) = searcher.search(&limits);
+        assert_eq!(mv.unwrap().to_uci(), "c3b1");
+        assert!(score > search::MATE_SCORE - 10);
+    }
+
+    #[test]
+    fn test_endgame_mop_up_eval() {
+        // K+R vs K: enemy king in corner should be better for White than enemy king in center
+        let center_king = read_FEN("8/8/8/3k4/8/3K4/8/R7 w - - 0 1");
+        let corner_king = read_FEN("k7/8/1K6/8/8/8/8/R7 w - - 0 1");
+        assert!(corner_king.evaluate() > center_king.evaluate());
     }
 }

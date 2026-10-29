@@ -7,22 +7,24 @@ A fast, UCI-compatible chess engine written in Rust featuring bitboard move gene
 - **Board Representation & Move Generation**:
   - Hybrid piece-list and incremental 64-bit bitboard representation (`piece_bbs`, `colour_bbs`, `occupied`).
   - Precomputed attack tables for knights, kings, pawns, and 8-direction sliding rays (`rook_attacks`, `bishop_attacks`, `queen_attacks`).
+  - Dedicated capture/promotion generator (`generate_pseudo_legal_captures`) and full Static Exchange Evaluation (`see`, `see_ge`) with X-ray slider discovery.
   - Full chess rules: castling (kingside/queenside), en passant, promotions, check/checkmate/stalemate detection.
-  - Full draw detection: threefold repetition, fifty-move rule, and insufficient material (`K vs K`, `KN vs K`, `KB vs K`, same-coloured `KB vs KB`).
+  - Standard Algebraic Notation (SAN) formatting (`move_to_san`) and move parsing (`parse_move`) supporting both UCI (`e2e4`, `e7e8q`) and SAN (`Nf3`, `O-O`, `Qxf7#`, `Rad1`).
+  - Full draw detection: threefold repetition, fifty-move rule, and insufficient material (`K vs K`, `KN vs K`, `KB vs K`, `KNN vs K`, same-coloured bishops).
   - Incremental 64-bit Zobrist hashing with O(1) `make_move` / `unmake_move` restoration.
 
 - **Search**:
-  - Iterative deepening with aspiration windows.
+  - Iterative deepening with aspiration windows and soft/hard time management.
   - Principal Variation Search (PVS) with triangular PV-table tracking.
   - Transposition Table (TT) with exact, lower-bound, and upper-bound entries and mate-distance score normalization.
-  - Check extensions, Null-Move Pruning (NMP), Reverse Futility Pruning (RFP), and Late Move Reductions (LMR).
-  - Quiescence search with check evasions, captures, and promotions.
-  - Move ordering: TT/PV move, MVV-LVA captures, promotions, killer moves, and history heuristic.
+  - Internal Iterative Reductions (IIR), Check Extensions, Null-Move Pruning (NMP), Reverse Futility Pruning (RFP), Futility Pruning, Late Move Pruning (LMP), SEE capture pruning, and Late Move Reductions (LMR).
+  - Quiescence search with TT probing, check evasions, delta pruning, and SEE capture pruning.
+  - Move ordering: TT/PV move, SEE-partitioned MVV-LVA captures (winning/equal captures above killers, losing captures below), promotions, killer moves, countermove heuristic, and history heuristic with gravity/malus updates.
 
 - **Evaluation**:
   - PeSTO tapered middlegame/endgame piece-square tables.
-  - Pawn structure evaluation: passed pawns, isolated pawns, doubled pawns.
-  - Piece mobility (knights, bishops, rooks), bishop pair bonus, rook on open/semi-open file bonus, king pawn shield, and tempo bonus.
+  - Pawn structure evaluation: passed pawns (with unblocked and king-proximity endgame bonuses), connected/phalanx pawns, isolated pawns, doubled pawns.
+  - Piece mobility (knights, bishops, rooks, queens), bishop pair bonus, rook on open/semi-open file and 7th rank bonus, king pawn shield, endgame king mop-up evaluation, and tempo bonus.
 
 ## Building & Running
 

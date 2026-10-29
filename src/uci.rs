@@ -1,10 +1,19 @@
 use std::io::{self, BufRead};
 use std::time::Instant;
 
-use crate::board::{Game, UndoInfo, read_FEN};
+use crate::board::{Game, UndoInfo};
 use crate::search::{SearchLimits, Searcher};
 use crate::tt::TranspositionTable;
 use crate::types::*;
+
+const BENCH_FENS: [&str; 6] = [
+    "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+    "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+    "8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1",
+    "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
+    "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8",
+    "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10",
+];
 
 pub struct UciHandler {
     pub game: Game,
@@ -81,6 +90,10 @@ impl UciHandler {
                 let depth = tokens.get(1).and_then(|s| s.parse().ok()).unwrap_or(1);
                 self.run_perft(depth);
             }
+            "bench" => {
+                let depth = tokens.get(1).and_then(|s| s.parse().ok()).unwrap_or(6);
+                self.run_bench(depth);
+            }
             "d" | "print" | "board" => {
                 print!("{}", self.game);
                 println!("FEN: {}", self.game.to_fen());
@@ -118,16 +131,17 @@ impl UciHandler {
                 println!("  ucinewgame                 - Reset board and clear hash table");
                 println!("  setoption name <N> [value <V>] - Configure UCI option (Hash, Clear Hash)");
                 println!("  position [startpos|fen <FEN>] [moves <m1> <m2> ...]");
-                println!("  go [depth <D>] [movetime <MS>] [wtime <MS>] [btime <MS>] [perft <D>]");
+                println!("  go [depth <D>] [movetime <MS>] [nodes <N>] [mate <M>] [wtime <MS>] [btime <MS>] [perft <D>]");
                 println!("  perft <D>                  - Run perft divide to depth D");
+                println!("  bench [D]                  - Run benchmark across standard positions to depth D");
                 println!("  d / board                  - Display board and FEN");
                 println!("  eval                       - Display static evaluation");
                 println!("  moves                      - List all legal moves");
                 println!("  undo                       - Undo last move");
-                println!("  <move> (e.g. e2e4)         - Play a move interactively against the engine");
+                println!("  <move> (e.g. e2e4 or Nf3)  - Play a move interactively against the engine");
                 println!("  quit / exit                - Exit the program");
             }
-            // If the user types a move directly (e.g. "e2e4")
+            // If the user types a move directly (e.g. "e2e4" or "Nf3")
             candidate_move => {
                 if let Some(mv) = self.parse_move_str(candidate_move) {
                     let undo = self.game.make_move(&mv);
@@ -147,9 +161,10 @@ impl UciHandler {
                     let mut searcher = Searcher::with_tt(&mut self.game, &mut self.tt);
                     let (best_move, _score) = searcher.search(&limits);
                     if let Some(bm) = best_move {
+                        let san = self.game.move_to_san(&bm);
                         let undo = self.game.make_move(&bm);
                         self.move_history.push((bm, undo));
-                        println!("Engine plays: {}", bm.to_uci());
+                        println!("Engine plays: {} ({})", bm.to_uci(), san);
                         print!("{}", self.game);
                         let _ = self.check_and_report_game_over();
                     }
@@ -244,8 +259,16 @@ impl UciHandler {
                 i += 1;
             }
             let fen_str = fen_parts.join(" ");
-            self.game = read_FEN(&fen_str);
-            self.move_history.clear();
+            match Game::from_fen(&fen_str) {
+                Ok(game) => {
+                    self.game = game;
+                    self.move_history.clear();
+                }
+                Err(e) => {
+                    eprintln!("Invalid FEN '{}': {}", fen_str, e);
+                    return;
+                }
+            }
 
             if i < tokens.len() && tokens[i] == "moves" {
                 move_idx = Some(i + 1);
@@ -284,6 +307,9 @@ impl UciHandler {
         let mut movestogo: u64 = 30;
         let mut movetime: Option<u64> = None;
         let mut depth_limit: Option<usize> = None;
+        let mut node_limit: Option<u64> = None;
+        let mut mate_limit: Option<usize> = None;
+        let mut soft_time_limit: Option<u64> = None;
         let mut infinite = false;
 
         let mut i = 0;
@@ -317,6 +343,14 @@ impl UciHandler {
                     depth_limit = tokens[i + 1].parse().ok();
                     i += 1;
                 }
+                "nodes" if i + 1 < tokens.len() => {
+                    node_limit = tokens[i + 1].parse().ok();
+                    i += 1;
+                }
+                "mate" if i + 1 < tokens.len() => {
+                    mate_limit = tokens[i + 1].parse().ok();
+                    i += 1;
+                }
                 "infinite" => {
                     infinite = true;
                 }
@@ -337,11 +371,15 @@ impl UciHandler {
             };
 
             if let Some(t) = my_time {
-                let budget = (t / movestogo + my_inc / 2)
+                let overhead = 30u64;
+                let safe_max = t.saturating_sub(overhead).max(5);
+                let target = (t / movestogo + (my_inc * 3) / 4)
                     .max(10u64)
-                    .min(t.saturating_sub(50));
-                limits.time_limit_ms = Some(budget);
-            } else if depth_limit.is_none() {
+                    .min(safe_max);
+                let hard_budget = (target * 2).min(safe_max);
+                soft_time_limit = Some(target);
+                limits.time_limit_ms = Some(hard_budget);
+            } else if depth_limit.is_none() && node_limit.is_none() && mate_limit.is_none() {
                 // Default search time for interactive use
                 limits.time_limit_ms = Some(1500);
             }
@@ -349,9 +387,14 @@ impl UciHandler {
 
         if let Some(d) = depth_limit {
             limits.max_depth = d;
+        } else if let Some(m) = mate_limit {
+            limits.max_depth = (m * 2 + 1).min(63);
         }
 
         let mut searcher = Searcher::with_tt(&mut self.game, &mut self.tt);
+        searcher.node_limit = node_limit;
+        searcher.mate_limit = mate_limit;
+        searcher.soft_time_limit_ms = soft_time_limit;
         let (best_move, _) = searcher.search(&limits);
 
         if let Some(mv) = best_move {
@@ -362,10 +405,7 @@ impl UciHandler {
     }
 
     pub fn parse_move_str(&mut self, s: &str) -> Option<Move> {
-        let legal_moves = self.game.generate_legal_moves();
-        legal_moves
-            .into_iter()
-            .find(|mv| mv.to_uci().eq_ignore_ascii_case(s))
+        self.game.parse_move(s)
     }
 
     pub fn run_perft(&mut self, depth: usize) {
@@ -389,5 +429,50 @@ impl UciHandler {
         println!();
         println!("Nodes searched: {}", total_nodes);
         println!("Time: {:.3} s ({} nps)", elapsed_sec, nps);
+    }
+
+    pub fn run_bench(&mut self, depth: usize) {
+        let start = Instant::now();
+        let mut total_nodes = 0u64;
+        let saved_game = self.game.clone();
+        let saved_history = self.move_history.clone();
+
+        for (idx, fen) in BENCH_FENS.iter().enumerate() {
+            println!("\nPosition {}/{}: {}", idx + 1, BENCH_FENS.len(), fen);
+            self.tt.clear();
+            if let Ok(g) = Game::from_fen(fen) {
+                self.game = g;
+                let limits = SearchLimits {
+                    max_depth: depth,
+                    time_limit_ms: None,
+                };
+                let mut searcher = Searcher::with_tt(&mut self.game, &mut self.tt);
+                let (best_mv, score) = searcher.search(&limits);
+                total_nodes += searcher.nodes;
+                println!(
+                    "Result: bestmove {} (score {} cp, {} nodes)",
+                    best_mv.map(|m| m.to_uci()).unwrap_or_else(|| "0000".to_string()),
+                    score,
+                    searcher.nodes
+                );
+            }
+        }
+
+        self.game = saved_game;
+        self.move_history = saved_history;
+
+        let elapsed = start.elapsed();
+        let elapsed_sec = elapsed.as_secs_f64();
+        let nps = if elapsed_sec > 0.0 {
+            (total_nodes as f64 / elapsed_sec) as u64
+        } else {
+            0
+        };
+
+        println!("\n========================================");
+        println!("Total time : {:.3} s", elapsed_sec);
+        println!("Total nodes: {}", total_nodes);
+        println!("Overall NPS: {} nodes/sec", nps);
+        println!("========================================");
     }
 }

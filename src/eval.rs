@@ -1,11 +1,42 @@
 use crate::board::Game;
-use crate::movegen::{ATTACKS, bishop_attacks, rook_attacks};
+use crate::movegen::{ATTACKS, bishop_attacks, queen_attacks, rook_attacks};
 use crate::types::*;
 
 pub const PIECE_VALUES: [i32; 6] = [100, 500, 320, 330, 900, 20000];
 
 const PASSED_PAWN_MG: [i32; 8] = [0, 5, 10, 20, 35, 60, 100, 0];
 const PASSED_PAWN_EG: [i32; 8] = [0, 10, 20, 40, 70, 115, 180, 0];
+
+const CENTER_MANHATTAN: [i32; 64] = [
+    6, 5, 4, 3, 3, 4, 5, 6,
+    5, 4, 3, 2, 2, 3, 4, 5,
+    4, 3, 2, 1, 1, 2, 3, 4,
+    3, 2, 1, 0, 0, 1, 2, 3,
+    3, 2, 1, 0, 0, 1, 2, 3,
+    4, 3, 2, 1, 1, 2, 3, 4,
+    5, 4, 3, 2, 2, 3, 4, 5,
+    6, 5, 4, 3, 3, 4, 5, 6,
+];
+
+#[inline]
+fn chebyshev_dist(sq1: usize, sq2: usize) -> i32 {
+    if sq1 >= 64 || sq2 >= 64 {
+        return 0;
+    }
+    let df = ((sq1 % 8) as i32 - (sq2 % 8) as i32).abs();
+    let dr = ((sq1 / 8) as i32 - (sq2 / 8) as i32).abs();
+    df.max(dr)
+}
+
+#[inline]
+fn manhattan_dist(sq1: usize, sq2: usize) -> i32 {
+    if sq1 >= 64 || sq2 >= 64 {
+        return 0;
+    }
+    let df = ((sq1 % 8) as i32 - (sq2 % 8) as i32).abs();
+    let dr = ((sq1 / 8) as i32 - (sq2 / 8) as i32).abs();
+    df + dr
+}
 
 pub struct EvalMasks {
     pub file_masks: [u64; 8],
@@ -247,11 +278,13 @@ impl Game {
             let friendly_occ = self.colour_bb(colour);
             let friendly_pawns = self.piece_bb(colour, PieceType::Pawn);
             let enemy_pawns = self.piece_bb(opp, PieceType::Pawn);
+            let our_king_sq = self.king_square(colour);
+            let enemy_king_sq = self.king_square(opp);
 
             let mut mg = 0i32;
             let mut eg = 0i32;
 
-            // 1. Pawns (Material + PST + Passed + Isolated + Doubled)
+            // 1. Pawns (Material + PST + Passed + Isolated + Doubled + Connected)
             let mut pawns = friendly_pawns;
             while pawns != 0 {
                 let sq = bit_scan(pawns);
@@ -261,16 +294,43 @@ impl Game {
                 eg += 100 + EG_PAWN_TABLE[table_sq];
 
                 let file = sq % 8;
+                let rank = sq / 8;
                 let rel_rank = if colour == Colour::White {
-                    sq / 8
+                    rank
                 } else {
-                    7 - (sq / 8)
+                    7 - rank
                 };
+
+                // Connected pawns: defended by a friendly pawn or part of a horizontal phalanx
+                let defended = (ATTACKS.pawn_attacks[opp.index()][sq] & friendly_pawns) != 0;
+                let phalanx_mask = EVAL_MASKS.adjacent_files_masks[file] & (0xFFu64 << (rank * 8));
+                let phalanx = (phalanx_mask & friendly_pawns) != 0;
+                if defended || phalanx {
+                    mg += 6 + rel_rank as i32 * 2;
+                    eg += 4 + rel_rank as i32 * 3;
+                }
 
                 // Passed pawn
                 if (EVAL_MASKS.passed_pawn_masks[c][sq] & enemy_pawns) == 0 {
                     mg += PASSED_PAWN_MG[rel_rank];
                     eg += PASSED_PAWN_EG[rel_rank];
+
+                    // Bonus if square directly in front is unoccupied
+                    let front_sq = if colour == Colour::White {
+                        sq + 8
+                    } else {
+                        sq.saturating_sub(8)
+                    };
+                    if front_sq < 64 && (occ & (1u64 << front_sq)) == 0 {
+                        eg += (rel_rank as i32) * 5;
+                    }
+
+                    // King proximity to advanced passed pawns in endgame
+                    if rel_rank >= 3 && our_king_sq < 64 && enemy_king_sq < 64 && front_sq < 64 {
+                        let d_enemy = chebyshev_dist(enemy_king_sq, front_sq);
+                        let d_us = chebyshev_dist(our_king_sq, front_sq);
+                        eg += (d_enemy * 4 - d_us * 2) * (rel_rank as i32 - 2);
+                    }
                 }
 
                 // Isolated pawn
@@ -324,8 +384,10 @@ impl Game {
                 eg += (mob - 6) * 4;
             }
 
-            // 4. Rooks (Material + PST + Open/Semi-Open File + Mobility)
+            // 4. Rooks (Material + PST + Open/Semi-Open File + 7th Rank + Mobility)
             let mut rooks = self.piece_bb(colour, PieceType::Rook);
+            let seventh_rank = if colour == Colour::White { 6 } else { 1 };
+            let eighth_rank = if colour == Colour::White { 7 } else { 0 };
             while rooks != 0 {
                 let sq = bit_scan(rooks);
                 rooks &= rooks - 1;
@@ -343,12 +405,21 @@ impl Game {
                     eg += 8;
                 }
 
+                // Rook on 7th rank bonus when enemy king is on 8th rank or enemy pawns on 7th
+                if sq / 8 == seventh_rank
+                    && ((enemy_king_sq < 64 && enemy_king_sq / 8 == eighth_rank)
+                        || (enemy_pawns & (0xFFu64 << (seventh_rank * 8))) != 0)
+                {
+                    mg += 20;
+                    eg += 30;
+                }
+
                 let mob = (rook_attacks(sq, occ) & !friendly_occ).count_ones() as i32;
                 mg += (mob - 7) * 2;
                 eg += (mob - 7) * 3;
             }
 
-            // 5. Queens (Material + PST)
+            // 5. Queens (Material + PST + Mobility)
             let mut queens = self.piece_bb(colour, PieceType::Queen);
             while queens != 0 {
                 let sq = bit_scan(queens);
@@ -357,6 +428,10 @@ impl Game {
                 mg += 900 + MG_QUEEN_TABLE[table_sq];
                 eg += 900 + EG_QUEEN_TABLE[table_sq];
                 game_phase += 4;
+
+                let mob = (queen_attacks(sq, occ) & !friendly_occ).count_ones() as i32;
+                mg += mob - 14;
+                eg += (mob - 14) * 2;
             }
 
             // 6. King (Material + PST + Pawn Shield)
@@ -375,6 +450,20 @@ impl Game {
 
             mg_scores[c] = mg;
             eg_scores[c] = eg;
+        }
+
+        // Endgame King Mop-Up: help force checkmate when one side has a clear winning advantage
+        let w_king = self.king_square(Colour::White);
+        let b_king = self.king_square(Colour::Black);
+        if w_king < 64 && b_king < 64 {
+            let raw_eg_diff = eg_scores[0] - eg_scores[1];
+            if raw_eg_diff >= 250 && self.piece_bb(Colour::Black, PieceType::Pawn) == 0 {
+                let mop_up = CENTER_MANHATTAN[b_king] * 12 + (14 - manhattan_dist(w_king, b_king)) * 5;
+                eg_scores[0] += mop_up;
+            } else if raw_eg_diff <= -250 && self.piece_bb(Colour::White, PieceType::Pawn) == 0 {
+                let mop_up = CENTER_MANHATTAN[w_king] * 12 + (14 - manhattan_dist(w_king, b_king)) * 5;
+                eg_scores[1] += mop_up;
+            }
         }
 
         let mg_score = mg_scores[0] - mg_scores[1];

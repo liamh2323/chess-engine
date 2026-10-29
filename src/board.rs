@@ -212,21 +212,30 @@ impl Game {
         let w_bishops = self.piece_bbs[0][PieceType::Bishop.index()];
         let b_bishops = self.piece_bbs[1][PieceType::Bishop.index()];
 
-        let minor_count = (w_knights | b_knights | w_bishops | b_bishops).count_ones();
+        let all_knights = w_knights | b_knights;
+        let all_bishops = w_bishops | b_bishops;
+        let minor_count = (all_knights | all_bishops).count_ones();
+
+        // K vs K, KN vs K, KB vs K
         if minor_count <= 1 {
             return true;
         }
 
-        // KB vs KB with bishops on the same square colour
-        if minor_count == 2
-            && (w_knights | b_knights) == 0
-            && w_bishops.count_ones() == 1
-            && b_bishops.count_ones() == 1
+        // KNN vs K (two knights vs lone king cannot force checkmate)
+        if all_bishops == 0
+            && ((w_knights.count_ones() == 2 && b_knights == 0)
+                || (b_knights.count_ones() == 2 && w_knights == 0))
         {
+            return true;
+        }
+
+        // Any number of bishops (and no knights) where all bishops are on the same colour squares
+        if all_knights == 0 {
             const LIGHT_SQUARES: u64 = 0x55AA_55AA_55AA_55AA;
-            let w_light = (w_bishops & LIGHT_SQUARES) != 0;
-            let b_light = (b_bishops & LIGHT_SQUARES) != 0;
-            if w_light == b_light {
+            const DARK_SQUARES: u64 = !LIGHT_SQUARES;
+            if (all_bishops & LIGHT_SQUARES) == all_bishops
+                || (all_bishops & DARK_SQUARES) == all_bishops
+            {
                 return true;
             }
         }
@@ -609,6 +618,247 @@ impl Game {
         fen.push_str(&format!(" {} {}", self.halfmove_clock, self.fullmove_clock));
         fen
     }
+
+    pub fn from_fen(fen: &str) -> Result<Game, String> {
+        let parts: Vec<&str> = fen.split_whitespace().collect();
+        if parts.is_empty() {
+            return Err("Empty FEN string".to_string());
+        }
+
+        let mut pieces = Vec::with_capacity(32);
+        let mut squares = vec![Square::Empty; 64];
+        let mut piece_bbs = [[0u64; 6]; 2];
+        let mut colour_bbs = [0u64; 2];
+        let mut occupied = 0u64;
+
+        let rows: Vec<&str> = parts[0].split('/').collect();
+        if rows.len() != 8 {
+            return Err(format!(
+                "Invalid FEN: expected 8 ranks, got {}",
+                rows.len()
+            ));
+        }
+
+        for (rank_idx, row) in rows.iter().enumerate() {
+            let rank = 7 - rank_idx;
+            let mut file = 0;
+            for ch in row.chars() {
+                if let Some(digit) = ch.to_digit(10) {
+                    file += digit as usize;
+                    if file > 8 {
+                        return Err(format!("File overflow in FEN rank {}: {}", rank + 1, row));
+                    }
+                } else if let Some((piece_type, colour)) = PieceType::from_char(ch) {
+                    if file >= 8 {
+                        return Err(format!("File overflow in FEN rank {}: {}", rank + 1, row));
+                    }
+                    let sq = rank * 8 + file;
+                    let bit = 1u64 << sq;
+                    let piece_idx = pieces.len();
+                    pieces.push(Piece {
+                        position: bit,
+                        colour,
+                        piece_type,
+                    });
+                    squares[sq] = Square::Occupied(piece_idx);
+                    piece_bbs[colour.index()][piece_type.index()] |= bit;
+                    colour_bbs[colour.index()] |= bit;
+                    occupied |= bit;
+                    file += 1;
+                } else {
+                    return Err(format!("Invalid piece char in FEN: {}", ch));
+                }
+            }
+            if file != 8 {
+                return Err(format!(
+                    "Invalid FEN rank {} width: expected 8, got {}",
+                    rank + 1,
+                    file
+                ));
+            }
+        }
+
+        let active_colour = if parts.len() > 1 {
+            match parts[1] {
+                "w" => Colour::White,
+                "b" => Colour::Black,
+                other => return Err(format!("Unknown colour designator: '{}'", other)),
+            }
+        } else {
+            Colour::White
+        };
+
+        let mut castling_rights = CastlingRights::NONE;
+        if parts.len() > 2 {
+            for ch in parts[2].chars() {
+                match ch {
+                    'K' => castling_rights |= CastlingRights::WHITEKINGSIDE,
+                    'Q' => castling_rights |= CastlingRights::WHITEQUEENSIDE,
+                    'k' => castling_rights |= CastlingRights::BLACKKINGSIDE,
+                    'q' => castling_rights |= CastlingRights::BLACKQUEENSIDE,
+                    '-' => (),
+                    other => return Err(format!("Invalid char in castling rights: '{}'", other)),
+                }
+            }
+        }
+
+        let en_passant = if parts.len() > 3 {
+            match parts[3] {
+                "-" => None,
+                s => Some(position_to_bit(s)?),
+            }
+        } else {
+            None
+        };
+
+        let halfmove_clock = if parts.len() > 4 {
+            parts[4].parse().unwrap_or(0)
+        } else {
+            0
+        };
+
+        let fullmove_clock = if parts.len() > 5 {
+            parts[5].parse().unwrap_or(1)
+        } else {
+            1
+        };
+
+        let mut game = Game {
+            pieces,
+            squares,
+            active_colour,
+            castling_rights,
+            en_passant,
+            halfmove_clock,
+            fullmove_clock,
+            piece_bbs,
+            colour_bbs,
+            occupied,
+            zobrist_hash: 0,
+            history: Vec::with_capacity(128),
+        };
+        game.zobrist_hash = game.compute_zobrist();
+        Ok(game)
+    }
+
+    pub fn move_to_san(&mut self, mv: &Move) -> String {
+        let legal_moves = self.generate_legal_moves();
+        let mut san = String::new();
+
+        if mv.is_castling {
+            if mv.to % 8 == 6 {
+                san.push_str("O-O");
+            } else {
+                san.push_str("O-O-O");
+            }
+        } else {
+            let pt = match self.squares[mv.from] {
+                Square::Occupied(idx) => self.pieces[idx].piece_type,
+                Square::Empty => return mv.to_uci(),
+            };
+            let is_capture = self.squares[mv.to] != Square::Empty || mv.is_en_passant;
+
+            if pt == PieceType::Pawn {
+                if is_capture {
+                    san.push(COL_MAP[mv.from % 8]);
+                    san.push('x');
+                }
+                san.push_str(&index_to_position(mv.to));
+                if let Some(promo) = mv.promotion {
+                    san.push('=');
+                    san.push(promo.to_char(Colour::White));
+                }
+            } else {
+                san.push(pt.to_char(Colour::White));
+
+                // Check for ambiguity among other legal moves of the same piece type to the same square
+                let ambiguous: Vec<&Move> = legal_moves
+                    .iter()
+                    .filter(|other| {
+                        other.from != mv.from
+                            && other.to == mv.to
+                            && match self.squares[other.from] {
+                                Square::Occupied(idx) => self.pieces[idx].piece_type == pt,
+                                Square::Empty => false,
+                            }
+                    })
+                    .collect();
+
+                if !ambiguous.is_empty() {
+                    let from_file = mv.from % 8;
+                    let from_rank = mv.from / 8;
+                    let same_file = ambiguous.iter().any(|m| m.from % 8 == from_file);
+                    let same_rank = ambiguous.iter().any(|m| m.from / 8 == from_rank);
+
+                    if !same_file {
+                        san.push(COL_MAP[from_file]);
+                    } else if !same_rank {
+                        san.push(char::from_digit((from_rank + 1) as u32, 10).unwrap());
+                    } else {
+                        san.push(COL_MAP[from_file]);
+                        san.push(char::from_digit((from_rank + 1) as u32, 10).unwrap());
+                    }
+                }
+
+                if is_capture {
+                    san.push('x');
+                }
+                san.push_str(&index_to_position(mv.to));
+            }
+        }
+
+        let undo = self.make_move(mv);
+        let in_check = self.is_in_check(self.active_colour);
+        if in_check {
+            if self.generate_legal_moves().is_empty() {
+                san.push('#');
+            } else {
+                san.push('+');
+            }
+        }
+        self.unmake_move(mv, &undo);
+
+        san
+    }
+
+    pub fn parse_move(&mut self, s: &str) -> Option<Move> {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        let legal_moves = self.generate_legal_moves();
+
+        // 1. Direct UCI coordinate match (e.g. "e2e4", "e7e8q")
+        if let Some(mv) = legal_moves
+            .iter()
+            .find(|mv| mv.to_uci().eq_ignore_ascii_case(trimmed))
+        {
+            return Some(*mv);
+        }
+
+        // 2. Standard Algebraic Notation (SAN) match (e.g. "Nf3", "e4", "O-O", "Qxf7#")
+        let clean = trimmed
+            .trim_end_matches(['+', '#', '!', '?'])
+            .replace("0-0-0", "O-O-O")
+            .replace("0-0", "O-O")
+            .replace("o-o-o", "O-O-O")
+            .replace("o-o", "O-O");
+
+        for mv in &legal_moves {
+            let san = self.move_to_san(mv);
+            let san_clean = san.trim_end_matches(['+', '#']);
+            if san == trimmed || san_clean == clean {
+                return Some(*mv);
+            }
+            // Also support SAN promotion without '=' (e.g. "e8Q" instead of "e8=Q")
+            if san_clean.contains('=') && san_clean.replace('=', "") == clean {
+                return Some(*mv);
+            }
+        }
+
+        None
+    }
 }
 
 pub fn split_on(s: &str, sep: char) -> (&str, &str) {
@@ -622,113 +872,8 @@ pub fn split_on(s: &str, sep: char) -> (&str, &str) {
 
 #[allow(non_snake_case)]
 pub fn read_FEN(fen: &str) -> Game {
-    let parts: Vec<&str> = fen.split_whitespace().collect();
-    if parts.is_empty() {
-        panic!("Empty FEN string");
+    match Game::from_fen(fen) {
+        Ok(game) => game,
+        Err(e) => panic!("{}", e),
     }
-
-    let mut pieces = Vec::with_capacity(32);
-    let mut squares = vec![Square::Empty; 64];
-    let mut piece_bbs = [[0u64; 6]; 2];
-    let mut colour_bbs = [0u64; 2];
-    let mut occupied = 0u64;
-
-    let rows: Vec<&str> = parts[0].split('/').collect();
-    if rows.len() != 8 {
-        panic!("Invalid FEN: expected 8 ranks, got {}", rows.len());
-    }
-
-    for (rank_idx, row) in rows.iter().enumerate() {
-        let rank = 7 - rank_idx;
-        let mut file = 0;
-        for ch in row.chars() {
-            if let Some(digit) = ch.to_digit(10) {
-                file += digit as usize;
-            } else if let Some((piece_type, colour)) = PieceType::from_char(ch) {
-                if file >= 8 {
-                    panic!("File overflow in FEN rank {}: {}", rank, row);
-                }
-                let sq = rank * 8 + file;
-                let bit = 1u64 << sq;
-                let piece_idx = pieces.len();
-                pieces.push(Piece {
-                    position: bit,
-                    colour,
-                    piece_type,
-                });
-                squares[sq] = Square::Occupied(piece_idx);
-                piece_bbs[colour.index()][piece_type.index()] |= bit;
-                colour_bbs[colour.index()] |= bit;
-                occupied |= bit;
-                file += 1;
-            } else {
-                panic!("Invalid piece char in FEN: {}", ch);
-            }
-        }
-    }
-
-    let active_colour = if parts.len() > 1 {
-        match parts[1] {
-            "w" => Colour::White,
-            "b" => Colour::Black,
-            other => panic!("Unknown colour designator: '{}'", other),
-        }
-    } else {
-        Colour::White
-    };
-
-    let mut castling_rights = CastlingRights::NONE;
-    if parts.len() > 2 {
-        for ch in parts[2].chars() {
-            match ch {
-                'K' => castling_rights |= CastlingRights::WHITEKINGSIDE,
-                'Q' => castling_rights |= CastlingRights::WHITEQUEENSIDE,
-                'k' => castling_rights |= CastlingRights::BLACKKINGSIDE,
-                'q' => castling_rights |= CastlingRights::BLACKQUEENSIDE,
-                '-' => (),
-                other => panic!("Invalid char in castling rights: '{}'", other),
-            }
-        }
-    }
-
-    let en_passant = if parts.len() > 3 {
-        match parts[3] {
-            "-" => None,
-            s => match position_to_bit(s) {
-                Ok(bit) => Some(bit),
-                Err(e) => panic!("{}", e),
-            },
-        }
-    } else {
-        None
-    };
-
-    let halfmove_clock = if parts.len() > 4 {
-        parts[4].parse().unwrap_or(0)
-    } else {
-        0
-    };
-
-    let fullmove_clock = if parts.len() > 5 {
-        parts[5].parse().unwrap_or(1)
-    } else {
-        1
-    };
-
-    let mut game = Game {
-        pieces,
-        squares,
-        active_colour,
-        castling_rights,
-        en_passant,
-        halfmove_clock,
-        fullmove_clock,
-        piece_bbs,
-        colour_bbs,
-        occupied,
-        zobrist_hash: 0,
-        history: Vec::with_capacity(128),
-    };
-    game.zobrist_hash = game.compute_zobrist();
-    game
 }
